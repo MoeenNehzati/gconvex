@@ -36,7 +36,7 @@ python runner.py
 4. After a run finishes, create visualizations and plots by `visualize.py`
 
 ```bash
-python runner.py
+python visualize.py
 ```
 
 or inspect the results by loading the saved snapshots by `utilities.loader()`.
