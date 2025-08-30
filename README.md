@@ -1,4 +1,4 @@
-Mechanism-design experiments — code and reproduction
+Implements the Class of Finitely Convex For Optimizing Over Generalized Convex Functions
 =================================================
 
 Overview
@@ -17,7 +17,7 @@ Repository layout
 
 Quick start
 -----------
-1. Install dependencies (typical):
+1. Install dependencies:
 
 <!-- ```bash
 python -m pip install torch matplotlib numpy
@@ -90,4 +90,4 @@ If you reuse this code in published work, please cite the accompanying paper.
 
 License
 -------
-This repository is provided for research reproducibility.
+This repository is licensed under Apache 2.0.
