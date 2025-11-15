@@ -91,3 +91,60 @@ If you reuse this code in published work, please cite the accompanying paper.
 License
 -------
 This repository is licensed under Apache 2.0.
+
+
+
+https://github.com/AmirTag/OT-ICNN
+
+
+Optimal transport mapping via input convex neural networks — Ashok V. Makkuva, Amirhossein Taghvaei, Sewoong Oh & Jason D. Lee. ICML (Proceedings of Machine Learning Research), 2020. 
+Proceedings of Machine Learning Research
++1
+
+Focus: learning OT maps under quadratic cost using input-convex neural networks (ICNNs).
+
+Why include: baseline method for neural OT map learning under classical cost.
+
+Scalable Computation of Monge Maps with General Costs — Jiaojiao Fan, Shu Liu, Shaojun Ma, Yongxin Chen & Haomin Zhou. ICLR Workshop / arXiv, 2021/2022. 
+OpenReview
++1
+
+Focus: computing Monge maps for general cost functions (beyond quadratic) in a scalable fashion.
+
+Why include: one of the few works explicitly addressing non-quadratic costs.
+
+Neural Optimal Transport with General Cost Functionals — Arip Asadulaev, Alexander Korotin, Vage Egiazarian, Petr Mokrov & Evgeny Burnaev. ICLR (or arXiv submission) 2022/2024. 
+arXiv
++1
+
+Focus: neural network-based OT for general cost functionals (including class‐guided, pair‐guided) with theoretical error analysis.
+
+Why include: the most directly related work if you’re working on non-Euclidean costs; this paper claims “general cost” setting.
+
+External baselines — clone commands
+----------------------------------
+If you want to pull external baseline repositories into this project under
+`baselines/external/` (so adapters in `baselines/external` can use them), run
+the following commands from the repository root:
+
+```bash
+# Clone OT-ICNN (Input-Convex Neural Networks for OT maps)
+git clone https://github.com/AmirTag/OT-ICNN baselines/external/OT-ICNN
+
+# Clone GNOT (Neural OT with general cost functionals)
+git clone https://github.com/machinestein/GNOT baselines/external/GNOT
+
+# (Optional) If you find an official Fan et al. implementation, clone similarly
+# git clone <fan-repo-url> baselines/external/FAN
+```
+
+Notes:
+- Cloning these projects may require additional dependencies (e.g. PyTorch).
+- We recommend using a virtualenv and installing pinned versions from
+    `setup.py` or manually, for example:
+
+```bash
+python -m pip install torch==1.9.0 torchvision==0.10.0
+```
+
+```

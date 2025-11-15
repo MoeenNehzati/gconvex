@@ -1,6 +1,5 @@
-import utilities
-
-WRITING_ROOT = "snapshots/"
+from tools import utils
+WRITING_ROOT = "tmp/"
 
 #Model info
 DIMS = [1, 2, 5, 10, 20, 50]
@@ -21,7 +20,7 @@ IS_Y_PARAMETER = True
 TEMP = 500
 MODEL_KWARGS = {
         "npoints": INITIAL_NPOINTS,
-        "kernel": utilities.linear_kernel,
+        "kernel": utils.linear_kernel,
         "y_dim": MAX_DIM,
         "is_Y_parameter": IS_Y_PARAMETER,
         "cost_fn": COST_FN,
@@ -75,7 +74,7 @@ SCHEDULERS_KWARGS_DICT = {
 
 #Train KWARGS
 WINDOW = 400
-CONSTRAINT_FNS = [utilities.model_min_constraint, utilities.model_max_constraint]
+CONSTRAINT_FNS = [utils.model_min_constraint, utils.model_max_constraint]
 USE_WANDB = False
 INITIAL_PENALTY_FACTOR = 1000.
 TRAIN_KWARGS = {
@@ -92,7 +91,7 @@ TRAIN_KWARGS = {
 
 PATH_RELEVANT_KWARGS = {
     "sample_size": EXPECTATION_SAMPLE_SIZE,
-    "kernel": utilities.linear_kernel,
+    "kernel": utils.linear_kernel,
     "max_dim": MAX_DIM,
     "is_there_default": IS_THERE_DEFAULT,    
 }

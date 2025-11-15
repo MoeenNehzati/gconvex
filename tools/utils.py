@@ -1,6 +1,56 @@
 import torch
 import sys, importlib
 import os
+import hashlib
+import json
+import hashlib
+import torch
+import numpy as np
+def _to_serializable(obj):
+    """
+    Recursively convert Python objects (including torch/numpy)
+    into JSON-serializable types.
+    """
+
+    # Torch tensor
+    if isinstance(obj, torch.Tensor):
+        # Scalar tensor → return Python number
+        if obj.dim() == 0:
+            return obj.item()
+        # Non-scalar → list
+        return obj.detach().cpu().tolist()
+
+    # Numpy array
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # Numpy scalar
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+
+    # Dict → recursive
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+
+    # List / Tuple → recursive
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(x) for x in obj]
+
+    # Basic Python primitive
+    return obj
+
+def hash_dict(d):
+    """
+    Convert a dict (possibly containing torch tensors) into canonical JSON
+    and compute a SHA-256 hash.
+    """
+    serializable = _to_serializable(d)
+
+    # canonical JSON encoding: sorted keys + no whitespace
+    json_str = json.dumps(serializable, sort_keys=True, separators=(",", ":"))
+
+    return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+
 
 def is_in_jupyter_notebook():
     try:

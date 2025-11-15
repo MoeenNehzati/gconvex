@@ -7,17 +7,13 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.patches import Patch
-from utilities import loader
-
+from tools.utils import loader
+from config import WRITING_ROOT
 # Try to use config.WRITING_DIR by default; fall back to None (show plots)
-try:
-    from config import WRITING_DIR as DEFAULT_SAVE_DIR
-except Exception:
-    DEFAULT_SAVE_DIR = None
 
 # ---------- core save/show helper ----------
 
-def _save_or_show(fig: plt.Figure, filename: str, save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+def _save_or_show(fig: plt.Figure, filename: str, save_dir: Optional[str] = WRITING_ROOT):
     """
     If save_dir is provided (or config.WRITING_DIR is available), save the figure there.
     Otherwise, display it interactively.
@@ -124,7 +120,7 @@ def theory_step_allocation(xs: np.ndarray, reserve: float = 0.5):
 
 # ---------- small plotting primitives ----------
 
-def _heatmap(Z, xs, ys, title, clabel=None, filename=None, save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+def _heatmap(Z, xs, ys, title, clabel=None, filename=None, save_dir: Optional[str] = WRITING_ROOT):
     fig, ax = plt.subplots(figsize=(6, 6))
     
     im = ax.imshow(Z, origin="lower", extent=[xs[0], xs[-1], ys[0], ys[-1]], aspect="equal")
@@ -136,7 +132,7 @@ def _heatmap(Z, xs, ys, title, clabel=None, filename=None, save_dir: Optional[st
         filename = title.lower().replace(" ", "_").replace("(", "").replace(")", "") + ".png"
     _save_or_show(fig, filename, save_dir)
 
-def _quiver(X, Y, U, V, title, step=8, filename=None, save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+def _quiver(X, Y, U, V, title, step=8, filename=None, save_dir: Optional[str] = WRITING_ROOT):
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.quiver(X[::step, ::step], Y[::step, ::step], U[::step, ::step], V[::step, ::step],
               angles="xy", scale_units="xy", scale=1.0)
@@ -153,7 +149,7 @@ def plot_mechanism_1d(mechanism: torch.nn.Module,
                       reserve: float = 0.5,
                       N: int = 1201,
                       show_revenue_curve: bool = True,
-                      save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+                      save_dir: Optional[str] = WRITING_ROOT):
     """
     Plots learned allocation/payment vs. posted-price theory, reports reserve & revenue.
     """
@@ -217,7 +213,7 @@ def plot_mechanism_2d(mechanism: torch.nn.Module,
                       show_quiver_field: bool = True,
                       quiver_step: int = 10,
                       kernel_label: str = "gross value (kernel)",
-                      save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+                      save_dir: Optional[str] = WRITING_ROOT):
     """
     Visual diagnostics on [0,1]^2:
       - q1, q2 heatmaps
@@ -279,7 +275,7 @@ def plot_revenue_fit_1d(mechanism: torch.nn.Module,
                         N_price_grid: int = 400,
                         price_from: str = "cutoff",
                         N_eval: int = 1201,
-                        save_dir: Optional[str] = DEFAULT_SAVE_DIR):
+                        save_dir: Optional[str] = WRITING_ROOT):
     """
     Show how your posted price fits the revenue curve R(p) for x ~ Uniform[0,1].
 
@@ -428,3 +424,86 @@ if __name__=="__main__":
         plot_profit(sample, dim_to_mechs)
         make_table(dim_to_mechs, sample, save_dir)
         # Collect profit per item for each mechanism
+
+
+def visualize_transport(x, y, model, save_dir=WRITING_ROOT,
+                        n_arrows=200, figsize=(7,7)):
+    """
+    Visualize the learned Monge map T(x) = ∇f(x) for a 2D OT ICNN model.
+
+    Saves: save_dir/OTplot_[ModelClassName].png
+    """
+    assert x.shape[1] == 2, "Visualization only implemented for d=2."
+
+    # -------------------------------------------
+    # Prepare directories + filename
+    # -------------------------------------------
+    os.makedirs(save_dir, exist_ok=True)
+    model_name = model.__class__.__name__
+    fig_path = os.path.join(save_dir, f"OTplot_{model_name}.png")
+
+    # -------------------------------------------
+    # Prepare CPU copies (no grad needed for plotting)
+    # -------------------------------------------
+    x_cpu = x.detach().cpu()
+    y_cpu = y.detach().cpu()
+
+    # -------------------------------------------
+    # Compute T(x) = ∇f(x)
+    # NOTE: transport_map REQUIRES autograd, so NO torch.no_grad() here.
+    # -------------------------------------------
+    Tx = model.transport_X_to_Y(x_cpu)          # uses autograd internally
+    Tx_cpu = Tx.detach().cpu()               # safe to detach AFTER gradient computation
+
+    # Convert to numpy (must be detached)
+    x_np  = x_cpu.detach().numpy()
+    y_np  = y_cpu.detach().numpy()
+    Tx_np = Tx_cpu.detach().numpy()
+
+    # -------------------------------------------
+    # Subsample for quiver arrows
+    # -------------------------------------------
+    n = min(n_arrows, x_np.shape[0])
+    idx = np.random.choice(x_np.shape[0], n, replace=False)
+    xs  = x_np[idx]
+    Txs = Tx_np[idx]
+
+    # -------------------------------------------
+    # Plot
+    # -------------------------------------------
+    plt.figure(figsize=figsize)
+
+    plt.scatter(
+        x_np[:, 0], x_np[:, 1],
+        s=10, color="blue", alpha=0.5, label="source $x$"
+    )
+    plt.scatter(
+        y_np[:, 0], y_np[:, 1],
+        s=10, color="red", alpha=0.5, label="target $y$"
+    )
+    plt.scatter(
+        Tx_np[:, 0], Tx_np[:, 1],
+        s=12, color="orange", alpha=0.6, label="$T(x)$"
+    )
+
+    # Arrows from x to T(x)
+    plt.quiver(
+        xs[:, 0], xs[:, 1],
+        Txs[:, 0] - xs[:, 0],
+        Txs[:, 1] - xs[:, 1],
+        angles="xy", scale_units="xy", scale=1.0,
+        width=0.002, alpha=0.35, color="black"
+    )
+
+    plt.legend()
+    plt.title("Learned Monge Map  $T(x)=\\nabla f(x)$")
+    plt.xlabel("$x_1$")
+    plt.ylabel("$x_2$")
+    plt.axis("equal")
+    plt.tight_layout()
+
+    plt.savefig(fig_path, dpi=200)
+    plt.close()
+
+    print(f"[✓] Saved transport figure to: {fig_path}")
+    return fig_path

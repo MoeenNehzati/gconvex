@@ -1,8 +1,8 @@
-import optim
+import model
 import torch
-import utilities
+from tools import utils
 import os
-from feedback import logger
+from tools.feedback import logger
 import math
 import config
 import torch
@@ -22,7 +22,7 @@ if __name__ == "__main__":
     # Initialize from config
     max_dim = config.MAX_DIM
     rank = config.RANK
-    joint_dir = utilities.generate_dir_and_name(f"{config.WRITING_ROOT}{desc}/", **config.PATH_RELEVANT_KWARGS)
+    joint_dir = utils.generate_dir_and_name(f"{config.WRITING_ROOT}{desc}/", **config.PATH_RELEVANT_KWARGS)
     sample_path = f"{joint_dir}sample.pt"
     if os.path.exists(sample_path):
         data = torch.load(sample_path)
@@ -38,7 +38,7 @@ if __name__ == "__main__":
             R = L @ L.T + torch.diag(uniq)
             jitter = 1e-5
             R = R + jitter * torch.eye(max_dim)
-            R,_ = utilities.greedy_neg_order(R)
+            R,_ = utils.greedy_neg_order(R)
             Lc = torch.linalg.cholesky(R)
             z = torch.randn(config.EXPECTATION_SAMPLE_SIZE, max_dim) @ Lc.T
             all_sample = 0.5 * (1.0 + torch.erf(z / math.sqrt(2)))
@@ -57,8 +57,8 @@ if __name__ == "__main__":
         model_kwargs = config.MODEL_KWARGS.copy()
         model_kwargs["y_dim"] = dim
         model_kwargs["npoints"] = npoints
-        dir = utilities.generate_dir_and_name(joint_dir, dim=dim)
-        mechanism, mechanism_data = optim.run(
+        dir = utils.generate_dir_and_name(joint_dir, dim=dim)
+        mechanism, mechanism_data = model.run(
                                             all_sample[:, :dim],
                                             config.MODES,
                                             compile=True,

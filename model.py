@@ -14,12 +14,12 @@ import numpy as np
 import torch
 from torch import nn
 from datetime import datetime
-import feedback
+import tools.feedback
 import os
-import utilities
+import tools.utils
 import math
 from typing import Dict, Any, Tuple, Optional, List, Callable
-logger = feedback.logger
+logger = tools.feedback.logger
 
 def moded_max(
     x: torch.Tensor,                 # (S, B)
