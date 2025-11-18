@@ -426,84 +426,94 @@ if __name__=="__main__":
         # Collect profit per item for each mechanism
 
 
-def visualize_transport(x, y, model, save_dir=WRITING_ROOT,
-                        n_arrows=200, figsize=(7,7)):
+def visualize_transport(
+    x, y, model, save_dir=WRITING_ROOT,
+    n_arrows=200, figsize=(7, 7)
+):
     """
-    Visualize the learned Monge map T(x) = ∇f(x) for a 2D OT ICNN model.
-
-    Saves: save_dir/OTplot_[ModelClassName].png
+    Visualize learned Monge map T(x)=∇f(x) with straight-line transport arrows.
+    Each arrow is a single line colored from red (start) → blue (end).
     """
     assert x.shape[1] == 2, "Visualization only implemented for d=2."
 
-    # -------------------------------------------
-    # Prepare directories + filename
-    # -------------------------------------------
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    from matplotlib.collections import LineCollection
+    import numpy as np
+    import os
+
+    # -----------------------------------------------------
+    # Prepare directory + filename
+    # -----------------------------------------------------
     os.makedirs(save_dir, exist_ok=True)
     model_name = model.__class__.__name__
     fig_path = os.path.join(save_dir, f"OTplot_{model_name}.png")
 
-    # -------------------------------------------
-    # Prepare CPU copies (no grad needed for plotting)
-    # -------------------------------------------
+    # -----------------------------------------------------
+    # Prepare data
+    # -----------------------------------------------------
     x_cpu = x.detach().cpu()
     y_cpu = y.detach().cpu()
+    Tx = model.transport_X_to_Y(x_cpu).detach().cpu()
 
-    # -------------------------------------------
-    # Compute T(x) = ∇f(x)
-    # NOTE: transport_map REQUIRES autograd, so NO torch.no_grad() here.
-    # -------------------------------------------
-    Tx = model.transport_X_to_Y(x_cpu)          # uses autograd internally
-    Tx_cpu = Tx.detach().cpu()               # safe to detach AFTER gradient computation
+    x_np = x_cpu.detach().numpy()
+    y_np = y_cpu.detach().numpy()
+    Tx_np = Tx.detach().numpy()
 
-    # Convert to numpy (must be detached)
-    x_np  = x_cpu.detach().numpy()
-    y_np  = y_cpu.detach().numpy()
-    Tx_np = Tx_cpu.detach().numpy()
-
-    # -------------------------------------------
-    # Subsample for quiver arrows
-    # -------------------------------------------
+    # -----------------------------------------------------
+    # Subsample for arrows
+    # -----------------------------------------------------
     n = min(n_arrows, x_np.shape[0])
     idx = np.random.choice(x_np.shape[0], n, replace=False)
-    xs  = x_np[idx]
+    xs = x_np[idx]
     Txs = Tx_np[idx]
 
-    # -------------------------------------------
+    # -----------------------------------------------------
+    # Build the transport lines
+    # -----------------------------------------------------
+    # Each line is shape (2,2): [[x1,y1],[x2,y2]]
+    lines = np.stack([xs, Txs], axis=1)  # shape (n,2,2)
+
+    # Create gradient colors: 0=red (start), 1=blue (end)
+    cmap = cm.get_cmap("coolwarm")  # red→white→blue
+    start_color = cmap(0.0)         # red side of coolwarm
+    end_color   = cmap(1.0)         # blue side
+
+    # Build a Nx2 array of colors: start red, end blue
+    # LineCollection expects one color *per line*, but we can fade using alpha
+    # So instead: fade based on distance
+    dists = np.sqrt(np.sum((Txs - xs)**2, axis=1))
+    if dists.max() > 0:
+        d_norm = (dists - dists.min()) / (dists.max() - dists.min())
+    else:
+        d_norm = np.zeros_like(dists)
+
+    # Blend: color = (1-t)*red + t*blue
+    colors = (1 - d_norm)[:, None] * start_color + d_norm[:, None] * end_color
+    colors[:, 3] = 0.8  # set alpha
+
+    # -----------------------------------------------------
     # Plot
-    # -------------------------------------------
+    # -----------------------------------------------------
     plt.figure(figsize=figsize)
 
-    plt.scatter(
-        x_np[:, 0], x_np[:, 1],
-        s=10, color="blue", alpha=0.5, label="source $x$"
-    )
-    plt.scatter(
-        y_np[:, 0], y_np[:, 1],
-        s=10, color="red", alpha=0.5, label="target $y$"
-    )
-    plt.scatter(
-        Tx_np[:, 0], Tx_np[:, 1],
-        s=12, color="orange", alpha=0.6, label="$T(x)$"
-    )
+    # Softer scatter for X, Y, and T(x)
+    plt.scatter(x_np[:, 0], x_np[:, 1], s=10, color="#b33939", alpha=0.45, label="source $x$")
+    plt.scatter(y_np[:, 0], y_np[:, 1], s=10, color="#3b6ea8", alpha=0.45, label="target $y$")
+    plt.scatter(Tx_np[:, 0], Tx_np[:, 1], s=12, color="#f5b041", alpha=0.55, label="$T(x)$")
 
-    # Arrows from x to T(x)
-    plt.quiver(
-        xs[:, 0], xs[:, 1],
-        Txs[:, 0] - xs[:, 0],
-        Txs[:, 1] - xs[:, 1],
-        angles="xy", scale_units="xy", scale=1.0,
-        width=0.002, alpha=0.35, color="black"
-    )
+    ax = plt.gca()
+    # lc = LineCollection(lines, colors=colors, linewidth=1.6)
+    # ax.add_collection(lc)
 
     plt.legend()
-    plt.title("Learned Monge Map  $T(x)=\\nabla f(x)$")
+    plt.title("Dynamic Transport: red → blue flow")
     plt.xlabel("$x_1$")
     plt.ylabel("$x_2$")
     plt.axis("equal")
     plt.tight_layout()
-
-    plt.savefig(fig_path, dpi=200)
+    plt.savefig(fig_path, dpi=240)
     plt.close()
 
-    print(f"[✓] Saved transport figure to: {fig_path}")
+    print(f"[✓] Saved dynamic transport figure to: {fig_path}")
     return fig_path

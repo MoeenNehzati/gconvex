@@ -8,7 +8,7 @@ from rich.live import Live
 from rich.console import Console
 from rich.logging import RichHandler
 from IPython import display
-from utilities import IN_JUPYTER
+from tools.utils import IN_JUPYTER
 from rich.theme import Theme
 import base64
 import numpy as np
