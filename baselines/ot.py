@@ -4,6 +4,7 @@ import os
 from config import WRITING_ROOT
 from tools.utils import hash_dict
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TimeElapsedColumn
+from tools.feedback import logger
 
 
 class OT:
@@ -104,24 +105,24 @@ class OT:
         # --------------------------------------------------------
         iters_done = 0
         if os.path.exists(address) and not force_retrain:
-            print(f"[CACHE] Found saved ICNN-OT model:\n  {address}")
+            logger.info(f"[CACHE] Found saved ICNN-OT model:\n  {address}")
             iters_done = self.load(address)             
-            print(f"[CACHE] Model previously trained for {iters_done} iterations.")
+            logger.info(f"[CACHE] Model previously trained for {iters_done} iterations.")
             # If we already reached or exceeded desired iters → return
             if iters_done >= iters:
-                print("[CACHE] Requested iterations already satisfied. Skipping training.")
+                logger.info("[CACHE] Requested iterations already satisfied. Skipping training.")
                 return {"f_losses": [], "g_losses": [], "W2": []}
-            print(f"[RESUME] Resuming training for {iters - iters_done} more iterations.")
+            logger.info(f"[RESUME] Resuming training for {iters - iters_done} more iterations.")
         else:
             if force_retrain:
-                print("[FORCE] Forced retrain from scratch.")
+                logger.info("[FORCE] Forced retrain from scratch.")
             else:
-                print(f"[TRAIN] No checkpoint found at `{address}`. Training from scratch.")
+                logger.info(f"[TRAIN] No checkpoint found at `{address}`. Training from scratch.")
 
         logs = self._fit(X, Y, iters_done, iters, inner_steps, print_every, callback, convergence_tol, convergence_patience)
         # --------------------------------------------------------
         # Save checkpoint
         # --------------------------------------------------------
-        print(f"[SAVE] Writing checkpoint to:\n  {address}")
+        logger.info(f"[SAVE] Writing checkpoint to:\n  {address}")
         self.save(address, iters)
         return logs

@@ -424,8 +424,16 @@ if __name__ == "__main__":
     # Argparser
     parser = argparse.ArgumentParser(description="Run matching and genetics experiment.")
     parser.add_argument("-c", "--correlated", action="store_true", help="Use correlated sample")
+    parser.add_argument('--log_level', type=str, default='INFO', 
+                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                       help='Set logging level (default: INFO)')
     parser.set_defaults(correlated=False)
     args = parser.parse_args()
+    
+    # Set logging level from command line
+    from tools.feedback import set_log_level
+    set_log_level(args.log_level)
+    
     if args.correlated:
         desc = "correlated"
     else:

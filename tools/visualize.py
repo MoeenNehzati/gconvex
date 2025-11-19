@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.patches import Patch
 from tools.utils import loader
+from tools.feedback import logger
 from config import WRITING_ROOT
 # Try to use config.WRITING_DIR by default; fall back to None (show plots)
 
@@ -23,7 +24,7 @@ def _save_or_show(fig: plt.Figure, filename: str, save_dir: Optional[str] = WRIT
         path = os.path.join(save_dir, filename)
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"[viz] saved {path}")
+        logger.info(f"[viz] saved {path}")
     else:
         fig.show()
 
@@ -197,9 +198,9 @@ def plot_mechanism_1d(mechanism: torch.nn.Module,
     l2_q = float(np.sqrt(np.mean((q - q_star)**2)))
     l2_t = float(np.sqrt(np.mean((t - t_star)**2)))
 
-    print(f"[1D] learned cutoff r̂: {r_hat:.3f}")
-    print(f"[1D] expected revenue — learned: {rev_learned:.4f} | theory(opt): {rev_theory:.4f} | gap: {rev_learned - rev_theory:+.4f}")
-    print(f"[1D] L2 error: q vs theory = {l2_q:.4f},  t vs theory = {l2_t:.4f}")
+    logger.info(f"[1D] learned cutoff r̂: {r_hat:.3f}")
+    logger.info(f"[1D] expected revenue — learned: {rev_learned:.4f} | theory(opt): {rev_theory:.4f} | gap: {rev_learned - rev_theory:+.4f}")
+    logger.info(f"[1D] L2 error: q vs theory = {l2_q:.4f},  t vs theory = {l2_t:.4f}")
 
 # ---------- 2D high-level visualization ----------
 
@@ -330,11 +331,11 @@ def plot_revenue_fit_1d(mechanism: torch.nn.Module,
     # 5) Print a quick summary vs learned mechanism revenue
     rev_learned = float(t.mean())  # uniform types on [0,1]
     rev_theory_opt = 0.25
-    print(f"[Revenue fit] marked price p = {p_mark:.3f}, R(p) = {R_mark:.4f}")
-    print(f"[Revenue fit] learned mechanism revenue (mean t): {rev_learned:.4f}")
-    print(f"[Revenue fit] theory optimum: {rev_theory_opt:.4f}, gap to marked: {R_mark - rev_theory_opt:+.4f}")
+    logger.info(f"[Revenue fit] marked price p = {p_mark:.3f}, R(p) = {R_mark:.4f}")
+    logger.info(f"[Revenue fit] learned mechanism revenue (mean t): {rev_learned:.4f}")
+    logger.info(f"[Revenue fit] theory optimum: {rev_theory_opt:.4f}, gap to marked: {R_mark - rev_theory_opt:+.4f}")
     if not np.isnan(r_hat):
-        print(f"[Revenue fit] learned cutoff r̂ from q(x): {r_hat:.3f}")
+        logger.info(f"[Revenue fit] learned cutoff r̂ from q(x): {r_hat:.3f}")
 
 
 def plot_profit(sample, dim_to_mechs):
@@ -346,7 +347,7 @@ def plot_profit(sample, dim_to_mechs):
     for dim, (mech, mech_date) in sorted(dim_to_mechs.items()):
         n_items.append(dim)
         p = mech_date["profits"].mean().item()
-        print(dim, p)
+        logger.debug(f"{dim} {p}")
         P.append(p/dim)
 
     fig, ax = plt.subplots(figsize=(6, 6))
@@ -402,9 +403,9 @@ if __name__=="__main__":
     from config import WRITING_ROOT
     data = loader()
     for tag, (sample, models) in data.items():
-        print(f"working on {tag}...")
+        logger.info(f"working on {tag}...")
         save_dir = f"{WRITING_ROOT}/plots/{tag}"
-        print(f"saving to {save_dir}")
+        logger.info(f"saving to {save_dir}")
         dim_to_mechs = {}
         for m in models:
             dim = m.full_Y().shape[2]
@@ -515,5 +516,5 @@ def visualize_transport(
     plt.savefig(fig_path, dpi=240)
     plt.close()
 
-    print(f"[✓] Saved dynamic transport figure to: {fig_path}")
+    logger.info(f"[✓] Saved dynamic transport figure to: {fig_path}")
     return fig_path

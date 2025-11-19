@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from baselines.ot import OT
 from models import FiniteModel
+from tools.feedback import logger
 
 
 class FCOT(OT):
@@ -140,9 +141,9 @@ class FCOT(OT):
         
         actual_params = num_candidates * params_per_candidate
         
-        print(f"[FCOT ARCH] dim={dim}, target_params={n_params_target}")
-        print(f"            num_candidates = {num_candidates}")
-        print(f"            actual_params  = {actual_params}")
+        logger.info(f"[FCOT ARCH] dim={dim}, target_params={n_params_target}")
+        logger.info(f"            num_candidates = {num_candidates}")
+        logger.info(f"            actual_params  = {actual_params}")
         
         # Build FiniteModel with kernel = cost (for c-concave representation)
         model = FiniteModel(
@@ -350,7 +351,7 @@ class FCOT(OT):
                 logs["u"].append(stats["u_mean"])
                 logs["uc"].append(stats["uc_mean"])
 
-                print(
+                logger.debug(
                     f"[Iter {it}] dual={dual:.6f} "
                     f"u={stats['u_mean']:.4f} "
                     f"uc={stats['uc_mean']:.4f}"
@@ -363,7 +364,7 @@ class FCOT(OT):
                     else:
                         patience = 0
                     if patience >= convergence_patience:
-                        print(
+                        logger.info(
                             f"[CONVERGED] dual rel change < {convergence_tol} "
                             f"for {convergence_patience} checks."
                         )

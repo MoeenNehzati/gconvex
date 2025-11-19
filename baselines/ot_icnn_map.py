@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from config import WRITING_ROOT
 from baselines.ot import OT
+from tools.feedback import logger
 
 def count_icnn_params(dim, hidden_sizes):
     """
@@ -208,10 +209,10 @@ class ICNNOT(OT):
             width_range=width_range
         )
 
-        print(f"[ARCH] dim={dim}, target={n_params_target}")
-        print(f"       depth        = {depth}")
-        print(f"       hidden_sizes = {hidden_sizes}")
-        print(f"       n_params     = {actual}")
+        logger.info(f"[ARCH] dim={dim}, target={n_params_target}")
+        logger.info(f"       depth        = {depth}")
+        logger.info(f"       hidden_sizes = {hidden_sizes}")
+        logger.info(f"       n_params     = {actual}")
 
         # Build two ICNN models
         f_model = KantorovichPotential(dim, hidden_sizes).to(device)
@@ -396,7 +397,7 @@ class ICNNOT(OT):
                 logs["f_losses"].append(f_loss)
                 logs["g_losses"].append(g_loss)
                 logs["W2"].append(w2)
-                print(f"[Iter {it}] f={f_loss:.4f}, g={g_loss:.4f}, W2={w2:.6f}")
+                logger.debug(f"[Iter {it}] f={f_loss:.4f}, g={g_loss:.4f}, W2={w2:.6f}")
 
             if callback is not None:
                 callback(it)
@@ -413,7 +414,7 @@ class ICNNOT(OT):
                     convergence_counter = 0
 
                 if convergence_counter >= convergence_patience:
-                    print(f"[CONVERGED] Relative W2 change < {convergence_tol} "
+                    logger.info(f"[CONVERGED] Relative W2 change < {convergence_tol} "
                         f"for {convergence_patience} iterations.")
                     iters = it + 1
                     break

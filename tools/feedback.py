@@ -64,6 +64,34 @@ logging.basicConfig(
 
 logger = logging.getLogger("training")
 
+
+def set_log_level(level: str | int):
+    """
+    Set the logging level for both console and file handlers.
+    
+    Args:
+        level: Logging level as string ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+               or as integer (logging.DEBUG, logging.INFO, etc.)
+    
+    Example:
+        >>> from tools.feedback import set_log_level
+        >>> set_log_level('DEBUG')  # Show debug messages
+        >>> set_log_level('WARNING')  # Only show warnings and above
+    """
+    if isinstance(level, str):
+        level = getattr(logging, level.upper())
+    
+    # Set level on training logger
+    logger.setLevel(level)
+    
+    # Set level on root logger
+    logging.getLogger().setLevel(level)
+    
+    # Update all root handlers (where our handlers are attached)
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(level)
+
+
 def make_status_panel(data: dict) -> Panel:
     color_cycle = itertools.cycle([
         "bold cyan", "bold red", "bold yellow", "bold magenta", 

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch.nn.utils as U
 from tools.utils import hash_dict
 from baselines.ot import OT
+from tools.feedback import logger
 
 
 # ------------------------------------------------------------
@@ -142,7 +143,7 @@ class GNOTOT(OT):
                     best_cfg = (width, layers)
 
         width, layers = best_cfg
-        print(f"[GNOTOT] Selected architecture with width={width}, layers={layers}, total_params≈{n_params_target} (diff={best_diff})")
+        logger.info(f"[GNOTOT] Selected architecture with width={width}, layers={layers}, total_params≈{n_params_target} (diff={best_diff})")
         return GNOTOT(
             input_dim=dim,
             hidden_dim=width,
@@ -312,6 +313,6 @@ class GNOTOT(OT):
                 callback(step, logs)
 
             if print_every and step % print_every == 0:
-                print(f"[step {step}] T_loss={last_T_loss:.4f}  D_loss={float(D_loss):.4f}  mean_cost={average_cost:.4f}")
+                logger.debug(f"[step {step}] T_loss={last_T_loss:.4f}  D_loss={float(D_loss):.4f}  mean_cost={average_cost:.4f}")
 
         return logs

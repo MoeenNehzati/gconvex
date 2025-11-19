@@ -8,6 +8,7 @@ import torch
 from tools.dgps import generate_gaussian_pairs
 from tools.visualize import visualize_transport
 from tools.utils import L22, inverse_grad_L22
+from tools.feedback import set_log_level
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
@@ -21,7 +22,14 @@ if __name__ == '__main__':
     p.add_argument('--lr', type=float, default=gauss_params.lr, help='learning rate')
     p.add_argument('--batch_size', type=int, default=gauss_params.batch_size, help='batch size')
     p.add_argument('--inner_optimizer', type=str, default=gauss_params.inner_optimizer, help='inner loop optimizer')
+    p.add_argument('--log_level', type=str, default='INFO', 
+                   choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                   help='Set logging level (default: INFO)')
     args = p.parse_args()
+    
+    # Set logging level from command line
+    set_log_level(args.log_level)
+    
     iters = args.iters
     fpath = args.data_path
     force_retrain = args.force_retrain
