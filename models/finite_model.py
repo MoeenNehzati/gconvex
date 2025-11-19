@@ -265,14 +265,17 @@ class FiniteModel(nn.Module):
         # Compute transform value and save warm starts
         # -------------------------------------------------------------
         with torch.no_grad():
-            _, f_x = self.forward(X_var)
-            k_x_z = self.kernel_fn(X_var, Z)
-            values = k_x_z - f_x
-
+            _, f_x_detached = self.forward(X_var)
+            k_x_z_detached = self.kernel_fn(X_var, Z)
+            
             if sample_idx is not None:
                 self._warm_X_global[sample_idx] = X_var.detach()
             else:
-                # Only when no batching
                 self._warm_X_fallback = X_var.detach()
+        
+        # Compute values WITH gradients for backprop
+        _, f_x = self.forward(X_var)
+        k_x_z = self.kernel_fn(X_var, Z)
+        values = k_x_z - f_x
 
-        return X_var.detach(), values.detach()
+        return X_var.detach(), values

@@ -50,7 +50,7 @@ import torch
 import torch.nn as nn
 import unittest
 import torch
-from tools.inf_convolution import InfConvolution
+from models import InfConvolution
 
 
 # ============================================================================

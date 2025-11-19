@@ -1,4 +1,4 @@
-import model
+from models import FiniteModel
 import torch
 from tools import utils
 import os
@@ -18,7 +18,6 @@ import os
 import tools.utils
 import math
 from typing import Dict, Any, Tuple, Optional, List, Callable
-from model import FinitelyConvexModel
 logger = tools.feedback.logger
 
 

@@ -1,333 +1,375 @@
 import torch
-import torch.nn.functional as F  # (may be unused but left for consistency)
-from config import WRITING_ROOT     # (may be unused but left for consistency)
+from torch import nn
 from baselines.ot import OT
-from model import FinitelyConvexModel
-from torch.utils.data import DataLoader, TensorDataset
+from models import FiniteModel
+
 
 class FCOT(OT):
     """
-    Finitely-convex OT solver using the (-c)-convex Kantorovich dual.
+    Finitely-concave OT solver using the Kantorovich dual:
 
-    We represent a (-c)-convex potential f with a FinitelyConvexModel using
-    surplus(x, y) = -c(x, y). The associated (-c)-dual functional is:
+        D = sup_{u c-concave} E_mu[u(X)] + E_nu[u^c(Y)].
 
-        J(f) = E_mu[f(X)] + E_nu[f^{(-c)}(Y)],
+    Parameterization:
+      - We represent u directly as a c-concave potential using a FiniteModel
+        with kernel Φ(x,y) = c(x,y) and mode="concave".
 
-    where f^{(-c)} is the sup-transform with respect to the surplus kernel.
+    Dual objective:
+        D = E_x[u(x)] + E_y[u^c(y)].
 
-    - We **minimize** J(f) with Adam.
-    - The OT cost is approximated by:
-
-          OT(mu, nu) ≈ -min J(f).
-
-    Logging convention:
-      - `loss`   = J(f)       (what we minimize)
-      - `dual`   = -J(f)      (estimate of the Kantorovich value, ~ OT cost)
-      - `f_mean` = E[f(X)]
-      - `g_mean` = E[f^{(-c)}(Y)]
+    This class:
+      - Maximizes D with Adam on the parameters of u.
+      - Uses FiniteModel.inf_transform with sample_idx for per-sample warm starts.
+      - Supports stochastic minibatching in _fit.
+      - Recovers the Monge map via the c-gradient of u with inverse_cx.
+    
+    Example:
+        >>> from models import FiniteModel
+        >>> from tools.utils import L22, inverse_grad_L22
+        >>> 
+        >>> # Create model
+        >>> model = FiniteModel(
+        ...     num_candidates=50,
+        ...     num_dims=2,
+        ...     kernel=lambda X, Y: L22(X, Y),
+        ...     mode="concave"
+        ... )
+        >>> 
+        >>> # Create FCOT solver
+        >>> fcot = FCOT(
+        ...     input_dim=2,
+        ...     model=model,
+        ...     inverse_cx=inverse_grad_L22,
+        ...     lr=1e-3
+        ... )
+        >>> 
+        >>> # Or use factory method to match parameter budget
+        >>> fcot = FCOT.initialize_right_architecture(
+        ...     dim=2,
+        ...     n_params_target=1000,
+        ...     cost=L22,
+        ...     inverse_cx=inverse_grad_L22
+        ... )
+        >>> 
+        >>> # Fit to data
+        >>> import torch
+        >>> X = torch.randn(100, 2)
+        >>> Y = torch.randn(100, 2)
+        >>> logs = fcot.fit(X, Y, iters=1000)
+        >>> 
+        >>> # Transport points
+        >>> Y_pred = fcot.transport_X_to_Y(X)
     """
 
-    def __init__(
-        self,
-        input_dim,
-        ncandidates,
-        cost,
-        inverse_cx,
-        lr: float = 1.,
+    # ----------------------------------------------------------------------
+    @staticmethod
+    def initialize_right_architecture(
+        dim: int,
+        n_params_target: int,
+        cost,                        # Cost function c(x,y)
+        inverse_cx,                  # Inverse gradient: (x,p) ↦ y solving ∇_x c(x,y) = p
+        lr: float = 1e-3,
         betas=(0.5, 0.9),
         device: str = "cpu",
         inner_optimizer: str = "lbfgs",
+        inner_steps: int = 5,
+        inner_lam: float = 1e-3,
+        inner_tol: float = 1e-3,
+        inner_lr: float | None = None,
+        temp: float = 50.0,
         is_cost_metric: bool = False,
+        **kwargs
     ):
-        # surplus(x,y) = -c(x,y)
-        surplus = lambda x, y: -cost(x, y)
-
-        self.input_dim   = input_dim
-        self.ncandidates = ncandidates
-        self.is_cost_metric = is_cost_metric
-        self.lr = lr
-        self.inner_optimizer = inner_optimizer
-
-        # Finitely convex potential f(x) = max_j k(x, y_j) - b_j with k = surplus
-        self.model = FinitelyConvexModel(
-            ncandidates=self.ncandidates,
-            dim=self.input_dim,
-            surplus=surplus,
-            temp=50.0,
-            is_there_default=False,
-            is_y_parameter=True,        # Y is trainable
-            is_cost_metric=self.is_cost_metric,        # kept for compatibility; may be unused internally
+        """
+        Factory method: creates FCOT instance matching a parameter budget.
+        
+        Automatically determines the number of candidates in the FiniteModel
+        to approximately match the desired parameter count.
+        
+        Parameters
+        ----------
+        dim : int
+            Input/output dimension
+        n_params_target : int
+            Target number of learnable parameters
+        cost : callable
+            Cost function c(X, Y) where X, Y have shape (batch, dim)
+        inverse_cx : callable
+            Maps (X, grad_c) → Y solving ∇_x c(X,Y) = grad_c
+        lr : float, default=1e-3
+            Learning rate for outer optimizer (Adam on model parameters)
+        betas : tuple, default=(0.5, 0.9)
+            Beta parameters for Adam optimizer
+        device : str, default="cpu"
+            Device to run on ("cpu" or "cuda")
+        inner_optimizer : str, default="lbfgs"
+            Inner loop optimizer: "lbfgs", "adam", or "gd"
+        inner_steps : int, default=5
+            Number of inner optimization steps for conjugate
+        inner_lam : float, default=1e-3
+            Regularization for inner solver
+        inner_tol : float, default=1e-3
+            Tolerance for inner solver convergence
+        inner_lr : float or None, default=None
+            Learning rate for inner solver (defaults to outer lr if None)
+        temp : float, default=50.0
+            Temperature for soft selection mode
+        is_cost_metric : bool, default=False
+            Whether the cost is a metric (unused currently, for future extensions)
+        **kwargs
+            Additional arguments (for compatibility)
+            
+        Returns
+        -------
+        FCOT
+            Initialized FCOT solver with approximately n_params_target parameters
+            
+        Notes
+        -----
+        Parameter count formula for FiniteModel:
+            n_params ≈ num_candidates * (dim + 1)
+        
+        where:
+            - num_candidates * dim parameters for Y positions
+            - num_candidates parameters for intercepts
+        """
+        # Estimate number of candidates needed
+        # Each candidate has: dim parameters (position) + 1 parameter (intercept)
+        params_per_candidate = dim + 1
+        num_candidates = max(1, n_params_target // params_per_candidate)
+        
+        actual_params = num_candidates * params_per_candidate
+        
+        print(f"[FCOT ARCH] dim={dim}, target_params={n_params_target}")
+        print(f"            num_candidates = {num_candidates}")
+        print(f"            actual_params  = {actual_params}")
+        
+        # Build FiniteModel with kernel = cost (for c-concave representation)
+        model = FiniteModel(
+            num_candidates=num_candidates,
+            num_dims=dim,
+            kernel=lambda X, Y: cost(X, Y),
+            mode="concave",
+            temp=temp,
         ).to(device)
-
-        # inverse_cx(x, p) returns y solving ∇_x c(x, y) = p
-        self.inverse_cx = inverse_cx
-        self.device     = torch.device(device)
-
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=lr, betas=betas
-        )
-        self.betas = betas
-
-    ############################################################
-    # Architecture helper
-    ############################################################
-    @staticmethod
-    def initialize_right_architecture(
-        dim,
-        n_params_target,
-        cost,
-        inverse_cx,
-        lr: float = 1.,
-        betas=(0.5, 0.9),
-        device: str = "cpu",
-        *args,
-        **kwargs,
-    ):
-        """
-        Heuristically choose the number of candidate Y points (ncandidates)
-        so that the total number of parameters is around `n_params_target`.
-        """
-        ncandidates = n_params_target // (dim + 1)
-
+        
         return FCOT(
             input_dim=dim,
-            ncandidates=ncandidates,
-            cost=cost,
+            model=model,
             inverse_cx=inverse_cx,
             lr=lr,
             betas=betas,
             device=device,
-            *args,
-            **kwargs,
+            inner_optimizer=inner_optimizer,
+            inner_steps=inner_steps,
+            inner_lam=inner_lam,
+            inner_tol=inner_tol,
+            inner_lr=inner_lr
         )
 
-    ############################################################
-    # Core dual objective and training utilities
-    ############################################################
-    def _dual_objective(self, X, Y, inner_steps):
-        """
-        Compute the Φ-dual functional:
+    # ----------------------------------------------------------------------
+    def __init__(
+        self,
+        input_dim: int,
+        model: nn.Module,        # FiniteModel(mode="concave", kernel = c)
+        inverse_cx,              # (x,p) ↦ y solving ∇_x c(x,y) = p
+        lr: float = 1e-3,
+        betas=(0.5, 0.9),
+        device: str = "cpu",
+        inner_optimizer: str = "lbfgs",
+        inner_steps: int = 5,
+        inner_lam: float = 1e-3,
+        inner_tol: float = 1e-3,
+        inner_lr: float | None = None,   # NEW: separate LR for inner solver (optional)
+    ):
+        super().__init__()
 
-            J(f) = E_mu[f(X)] + E_nu[f^{Φ}(Y)],
+        self.input_dim = input_dim
+        self.model = model.to(device)
+        self.device = torch.device(device)
+
+        self.inverse_cx = inverse_cx
+
+        # Outer optimizer (on f parameters)
+        self.lr = lr
+        self.betas = betas
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=betas)
+
+        # Inner conjugate solver hyperparams
+        self.inner_optimizer = inner_optimizer
+        self.inner_steps = inner_steps
+        self.inner_lam = inner_lam
+        self.inner_tol = inner_tol
+        # If inner_lr is None, fall back to outer lr (no behavior change)
+        self.inner_lr = lr if inner_lr is None else inner_lr
+
+
+    # ----------------------------------------------------------------------
+    # Dual objective on a given batch
+    # ----------------------------------------------------------------------
+    def _dual_objective(self, X_batch, Y_batch, idx_y):
+        """
+        Compute on a minibatch:
+
+            D = E_x[u(X)] + E_y[u^c(Y)].
 
         where:
-          - model.forward(X)   returns f(X)  (a Φ-convex potential),
-          - model.conjugate(Y) returns f^{Φ}(Y) (its sup-transform).
-        Returns:
-          d  = -J(f)     (scalar tensor),
-          j  = J(f)         (scalar tensor),
-          fmean = E[f(X)],
-          gmean = E[f^{Φ}(Y)].
+          - u is represented by self.model.forward
+          - u^c is computed by self.model.inf_transform
+
+        Y_batch must be accompanied by idx_y (global indices into Y)
+        so that FiniteModel can use per-sample warm starts for LBFGS/Adam.
         """
-        # f(X): (-c)-convex potential
-        _, f_vals = self.model.forward(X,
-                                       selection_mode="soft")
-        _, g_vals = self.model.conjugate(
-            Z=Y,
-            sample_idx=None,
-            selection_mode="soft",
-            steps=inner_steps,
+        # u(X)
+        _, u_vals = self.model.forward(X_batch, selection_mode="soft")
+
+        # u^c(Y): numerical inf_x [ c(x,y) - u(x) ]
+        _, uc_vals = self.model.inf_transform(
+            Z=Y_batch,
+            sample_idx=idx_y,                # <--- crucial for warm-start
+            steps=self.inner_steps,
+            lr=self.inner_lr,                # <--- separate inner LR (tunable)
             optimizer=self.inner_optimizer,
-            lr=self.lr,
-        )  # (#samples,)
+            lam=self.inner_lam,
+            tol=self.inner_tol,
+        )
 
-        fmean = f_vals.mean()
-        gmean = g_vals.mean()
-        j  = fmean + gmean
-        d = -j      # J(f)
-        return d, j, fmean, gmean
+        u_mean = u_vals.mean()
+        uc_mean = uc_vals.mean()
 
-    def step(self, x_batch, y_batch, inner_steps):
+        D = u_mean + uc_mean
+        return D, u_mean, uc_mean
+
+
+    # ----------------------------------------------------------------------
+    # One stochastic dual step
+    # ----------------------------------------------------------------------
+    def _step(self, X_batch, Y_batch, idx_y):
         """
-        Single gradient step maximizing the kantorovitch dual
-        We have definve the surplus Φ = -c
-        For cost c we define f^c(y) = inf_x [c(x,y) - f(x)]
-        For surplus Φ we define f^Φ(y) = sup_x [Φ(x,y) - f(x)]
-        We have f^c = -(-f)^Φ and f^Φ = -(-f)^c
-        If f is c-concave, then -f is Φ-convex
+        Perform one stochastic gradient step w.r.t. D on a minibatch.
 
-        The Kantorovitch dual D is:
-        D = sup_{f finitely c-concave} E_x[f(X)] + E_y[f^c(Y)]
-        D = -inf_{f finitely c-concave} E_x[-f(X)] + E_y[-f^c(Y)]
-        setting g = -f we have
-        D = - inf_{g finitely Φ-convex} E_x[g(X)] + E_y[g^Φ(Y)]
-        So we need to minimize J(g) = E_x[g(X)] + E_y[g^Φ(Y)]
-
-        Returns a dict of detached scalars for logging:
-          - J: J(f)
-          - dual: -J(f)     (estimate of the OT cost)
-          - f_mean: E[f(X)]
-          - g_mean: E[f^Φ(Y)]
+        We *maximize* D, hence do gradient ascent: -D.backward() is equivalent to
+        ascending on D.
         """
         self.optimizer.zero_grad()
-        d, j, f_mean, g_mean = self._dual_objective(x_batch, y_batch, inner_steps)
-        j.backward()
+
+        D, u_mean, uc_mean = self._dual_objective(X_batch, Y_batch, idx_y)
+        # Maximize D by minimizing -D
+        loss = -D
+        loss.backward()
+
+        # Optional: small, safe grad clipping (helps stability; negligible speed cost)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+
         self.optimizer.step()
 
         return {
-            "dual":  d.detach().item(),  # OT estimate
-            "J":   j.detach().item(),
-            "f_mean": float(f_mean.detach().item()),
-            "g_mean": float(g_mean.detach().item()),
+            "dual": float(D.detach().item()),
+            "u_mean": float(u_mean.detach().item()),
+            "uc_mean": float(uc_mean.detach().item()),
         }
 
+
+    # ----------------------------------------------------------------------
+    # Monge map T(X): via ∇u and inverse_cx
+    # ----------------------------------------------------------------------
     def transport_X_to_Y(self, X):
         """
-        Compute the Monge map T(X) using the c-gradient of the c-convex potential u.
+        Recover the Monge map T(x) from the learned potential.
 
-        Model represents a (-c)-convex f. We set:
+        Our model stores u as a c-concave function.
 
-            u(x) = -f(x)   (c-convex),
-
-        and the optimal map satisfies:
+        For the optimal c-concave potential u, the map satisfies:
 
             ∇_x c(x, T(x)) = ∇u(x).
 
-        Given an oracle inverse_cx(x, p) solving ∇_x c(x, y) = p,
-        we obtain T(x) as:
-
+        So:
             T(x) = inverse_cx(x, ∇u(x)).
         """
-        X = X.to(self.device)
-        X = X.requires_grad_(True)
-        _, f_vals = self.model.forward(X, selection_mode="soft")
-        grad_f = torch.autograd.grad(f_vals.sum(), X, create_graph=False)[0]
+        X = X.to(self.device).requires_grad_(True)
+
+        _, u_vals = self.model.forward(X, selection_mode="soft")
+        grad_u = torch.autograd.grad(u_vals.sum(), X)[0]
+
         with torch.no_grad():
-            Y = self.inverse_cx(X, -grad_f)
+            Y = self.inverse_cx(X, grad_u)
+
         return Y
 
-    def debug_losses(self, X, Y):
+
+    # ----------------------------------------------------------------------
+    # Training loop: this is what OT.fit(...) will call
+    # ----------------------------------------------------------------------
+    def _fit(
+        self,
+        X,
+        Y,
+        batch_size: int = 512,
+        iters: int = 2000,
+        print_every: int = 50,
+        callback=None,
+        convergence_tol: float = 1e-4,
+        convergence_patience: int = 50,
+    ):
         """
-        Convenience helper for quick diagnostics.
+        Stochastic training of the Kantorovich dual using random minibatches.
 
-        Returns a list:
-          [dual_estimate, loss, f_mean, g_mean]
-        where:
-          - dual_estimate = -loss ≈ OT cost,
-          - loss          = J(f),
-          - f_mean        = E[f(X)],
-          - g_mean        = E[f^{(-c)}(Y)].
+        X, Y: full datasets (num_x, dim), (num_y, dim).
+        This method is called by OT.fit(...).
+
+        Returns:
+            logs: dict with keys "dual", "f", "g" tracking training trajectory.
         """
-        with torch.no_grad():
-            d, j, f_mean, g_mean = self._dual_objective(
-                X.to(self.device), Y.to(self.device)
-            )
-        return [d.item(), j.item(), f_mean.item(), g_mean.item()]
-
-    ############################################################
-    # Save / Load
-    ############################################################
-    def save(self, address, iters_done):
-        torch.save({
-            "model_state": self.model.state_dict(),
-            "iters_done": iters_done,
-            "betas": self.betas,
-            "input_dim": self.input_dim,
-            "ncandidates": self.ncandidates,
-        }, address)
-
-    def load(self, address):
-        data = torch.load(address, map_location=self.device)
-        self.model.load_state_dict(data["model_state"])
-        self.betas = data.get("betas", self.betas)
-        self.input_dim = data.get("input_dim", self.input_dim)
-        self.ncandidates = data.get("ncandidates", self.ncandidates)
-        return data.get("iters_done", 0)
-
-    ############################################################
-    # Training loop
-    ############################################################
-    ############################################################
-    # Training loop (with minibatches)
-    ############################################################
-    def _fit(self,
-             X,
-             Y,
-             iters_done=0,
-             iters=10000,
-             inner_steps=5,
-             print_every=50,
-             callback=None,
-             convergence_tol=1e-4,
-             convergence_patience=50,
-             batch_size=256):
-        """
-        Run the training loop using minibatches of (X, Y).
-
-        Arguments
-        ---------
-        X, Y : tensors of shape (N, dim)
-        iters : total number of optimizer steps
-        batch_size : minibatch size for both X and Y
-
-        Logs:
-          - logs["dual"]: sequence of -J(f) (OT estimates),
-          - logs["f"]:    E[f(X)]  on the last seen batch,
-          - logs["g"]:    E[f^{(-c)}(Y)] on the last seen batch.
-        """
-
-        # Move full data once to device
         X = X.to(self.device)
         Y = Y.to(self.device)
+        nX, nY = X.shape[0], Y.shape[0]
 
-        # One dataset over pairs; we only use X for f and Y for conjugate,
-        # but sampling pairs is still unbiased for the marginals.
-        dataset = TensorDataset(X, Y)
-        loader = DataLoader(dataset,
-                            batch_size=batch_size,
-                            shuffle=True,
-                            drop_last=False)
+        logs = {"dual": [], "u": [], "uc": []}
 
-        data_iter = iter(loader)
-
-        logs = {"dual": [], "f": [], "g": []}
         prev_dual = None
-        patience_counter = 0
+        patience = 0
 
-        for it in range(iters_done, iters):
-            # ------------------------------------------------
-            # Get next minibatch, recycle iterator if needed
-            # ------------------------------------------------
-            try:
-                x_batch, y_batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(loader)
-                x_batch, y_batch = next(data_iter)
+        for it in range(iters):
+            # -------------------------------------------------------
+            # Sample random mini-batches for X and Y
+            # -------------------------------------------------------
+            idx_x = torch.randint(0, nX, (batch_size,), device=self.device)
+            idx_y = torch.randint(0, nY, (batch_size,), device=self.device)
 
-            # ------------------------------------------------
-            # One SGD/Adam step on the minibatch
-            # ------------------------------------------------
-            last_stats = self.step(x_batch, y_batch, inner_steps=inner_steps)
+            Xb = X[idx_x]
+            Yb = Y[idx_y]
 
-            # ------------------------------------------------
-            # Logging + simple convergence check
-            # ------------------------------------------------
-            if it % print_every == 0 and last_stats is not None:
-                dual_val = last_stats["dual"]
-                logs["dual"].append(dual_val)
-                logs["f"].append(last_stats["f_mean"])
-                logs["g"].append(last_stats["g_mean"])
+            stats = self._step(Xb, Yb, idx_y)
+
+            # -------------------------------------------------------
+            # Logging and convergence check
+            # -------------------------------------------------------
+            if it % print_every == 0:
+                dual = stats["dual"]
+                logs["dual"].append(dual)
+                logs["u"].append(stats["u_mean"])
+                logs["uc"].append(stats["uc_mean"])
 
                 print(
-                    f"[Iter {it}] dual={dual_val:.6f} j={last_stats['J']:.6f} "
-                    f"f={last_stats['f_mean']:.4f} g={last_stats['g_mean']:.4f}"
+                    f"[Iter {it}] dual={dual:.6f} "
+                    f"u={stats['u_mean']:.4f} "
+                    f"uc={stats['uc_mean']:.4f}"
                 )
 
-                # Convergence check on dual (OT estimate, on minibatch)
                 if prev_dual is not None:
-                    rel_change = abs(dual_val - prev_dual) / (abs(prev_dual) + 1e-12)
-                    if rel_change < convergence_tol:
-                        patience_counter += 1
+                    rel = abs(dual - prev_dual) / (abs(prev_dual) + 1e-12)
+                    if rel < convergence_tol:
+                        patience += 1
                     else:
-                        patience_counter = 0
-                    if patience_counter >= convergence_patience:
+                        patience = 0
+                    if patience >= convergence_patience:
                         print(
                             f"[CONVERGED] dual rel change < {convergence_tol} "
-                            f"for {convergence_patience} checks (minibatch)."
+                            f"for {convergence_patience} checks."
                         )
                         break
-                prev_dual = dual_val
+
+                prev_dual = dual
 
             if callback is not None:
                 callback(it)
