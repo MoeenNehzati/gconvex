@@ -23,6 +23,7 @@ class FCOT(OT):
       - Uses FiniteModel.inf_transform with sample_idx for per-sample warm starts.
       - Supports stochastic minibatching in _fit.
       - Recovers the Monge map via the c-gradient of u with inverse_cx.
+      - Issues warnings when inner optimization (conjugate computation) fails to converge.
     
     Example:
         >>> from models import FiniteModel
@@ -225,7 +226,7 @@ class FCOT(OT):
         _, u_vals = self.model.forward(X_batch, selection_mode="soft")
 
         # u^c(Y): numerical inf_x [ c(x,y) - u(x) ]
-        _, uc_vals = self.model.inf_transform(
+        _, uc_vals, converged = self.model.inf_transform(
             Z=Y_batch,
             sample_idx=idx_y,                # <--- crucial for warm-start
             steps=self.inner_steps,
@@ -234,6 +235,14 @@ class FCOT(OT):
             lam=self.inner_lam,
             tol=self.inner_tol,
         )
+        
+        # Warn if inner optimization didn't converge
+        if not converged:
+            logger.warning(
+                f"[FCOT] Inner optimization did not converge with {self.inner_steps} steps "
+                f"(optimizer={self.inner_optimizer}, lr={self.inner_lr:.2e}, tol={self.inner_tol:.2e}). "
+                f"Consider increasing inner_steps or relaxing inner_tol."
+            )
 
         u_mean = u_vals.mean()
         uc_mean = uc_vals.mean()

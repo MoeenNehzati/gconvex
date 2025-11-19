@@ -34,8 +34,18 @@ model = FiniteModel(
 # Forward pass
 f_values = model(x_batch)
 
-# Sup/inf transform
-g_values = model.sup_transform(y_batch, optimizer="lbfgs")
+# Sup/inf transform (returns 3-tuple)
+X_opt, g_values, converged = model.sup_transform(
+    y_batch, 
+    optimizer="lbfgs",
+    steps=50,
+    lr=1e-3,
+    tol=1e-6
+)
+
+# Check convergence
+if not converged:
+    print("Warning: optimization did not converge")
 ```
 
 ### InfConvolution (`inf_convolution.py`)

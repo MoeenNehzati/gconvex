@@ -196,7 +196,7 @@ class TestFiniteModelMetricProperties(unittest.TestCase):
         _, fz = model.forward(Z, "soft")
         self.assertLess(fz.item(), 0.01)
 
-        _, v = model.inf_transform(Z, steps=200, lr=5e-3, optimizer="adam")
+        _, v, _ = model.inf_transform(Z, steps=200, lr=5e-3, optimizer="adam")
         self.assertTrue(torch.isfinite(v).all())
         self.assertLess(abs(v.item() + fz.item()), 0.1)
 
@@ -212,7 +212,7 @@ class TestFiniteModelMetricProperties(unittest.TestCase):
         _, fz = model.forward(Z, "soft")
         self.assertLess(abs(fz.item()), 0.01)
 
-        _, v = model.sup_transform(Z, steps=200, lr=5e-3, optimizer="adam")
+        _, v, _ = model.sup_transform(Z, steps=200, lr=5e-3, optimizer="adam")
         self.assertTrue(torch.isfinite(v).all())
         self.assertLess(abs(v.item() + fz.item()), 0.1)
 
@@ -222,7 +222,7 @@ class TestFiniteModelMetricProperties(unittest.TestCase):
         X = torch.randn(5, 2)
 
         _, fx = model.forward(X)
-        _, fcx = model.sup_transform(X, steps=50, lr=1e-2, optimizer="adam")
+        _, fcx, _ = model.sup_transform(X, steps=50, lr=1e-2, optimizer="adam")
 
         corr = torch.corrcoef(torch.stack([fx, fcx]))[0,1]
         self.assertGreater(abs(corr), 0.3)
@@ -232,8 +232,8 @@ class TestFiniteModelMetricProperties(unittest.TestCase):
         model = FiniteModel(8, 2, kernel)
         Z = torch.randn(3, 2)
 
-        _, infv = model.inf_transform(Z)
-        _, supv = model.sup_transform(Z)
+        _, infv, _ = model.inf_transform(Z)
+        _, supv, _ = model.sup_transform(Z)
 
         self.assertTrue(torch.isfinite(infv).all())
         self.assertTrue(torch.isfinite(supv).all())
@@ -244,7 +244,7 @@ class TestFiniteModelOptimization(unittest.TestCase):
         k = lambda x, y: -((x - y)**2).sum(-1)
         model = FiniteModel(5, 2, k)
         Z = torch.randn(4,2)
-        Xs, vals = model.sup_transform(Z, steps=20, lr=1e-1, optimizer="lbfgs")
+        Xs, vals, _ = model.sup_transform(Z, steps=20, lr=1e-1, optimizer="lbfgs")
         self.assertEqual(Xs.shape, (4,2))
         self.assertTrue(torch.isfinite(vals).all())
 
@@ -252,7 +252,7 @@ class TestFiniteModelOptimization(unittest.TestCase):
         k = lambda x, y: (x * y).sum(-1)
         model = FiniteModel(5, 2, k)
         Z = torch.randn(4,2)
-        Xs, vals = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="adam")
+        Xs, vals, _ = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="adam")
         self.assertEqual(Xs.shape, (4,2))
         self.assertTrue(torch.isfinite(vals).all())
 
@@ -260,7 +260,7 @@ class TestFiniteModelOptimization(unittest.TestCase):
         k = lambda x, y: -((x - y)**2).sum(-1)
         model = FiniteModel(5,2,k,mode="concave")
         Z = torch.randn(3,2)
-        Xs, vals = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="gd")
+        Xs, vals, _ = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="gd")
         self.assertEqual(Xs.shape, (3,2))
 
 
@@ -280,13 +280,13 @@ class TestFiniteModelWarmStartBehavior(unittest.TestCase):
         Z = torch.randn(32,2)
 
         # cold
-        _, v1 = model.sup_transform(Z, steps=5, optimizer="adam", lr=5e-3)
+        _, v1, _ = model.sup_transform(Z, steps=5, optimizer="adam", lr=5e-3)
 
         self.assertTrue(hasattr(model, "_warm_X_fallback"))
         self.assertEqual(model._warm_X_fallback.shape, (32,2))
 
         # warm
-        _, v2 = model.sup_transform(Z, steps=3, optimizer="adam", lr=5e-3)
+        _, v2, _ = model.sup_transform(Z, steps=3, optimizer="adam", lr=5e-3)
         self.assertTrue(torch.allclose(v1, v2, atol=5e-2, rtol=1e-3))
 
 
@@ -333,7 +333,7 @@ class TestFiniteModelWarmStartBehavior(unittest.TestCase):
         idx_subset = torch.tensor(random.sample(range(30),15))
         Z_small = Z[idx_subset]
 
-        _, v_small = model.sup_transform(Z_small, sample_idx=idx_subset)
+        _, v_small, _ = model.sup_transform(Z_small, sample_idx=idx_subset)
 
         self.assertTrue(torch.isfinite(v_small).all())
         self.assertEqual(model._warm_X_global.shape,(30,2))
@@ -383,11 +383,11 @@ class TestFiniteModelBatchConsistency(unittest.TestCase):
 
         Z = torch.randn(32,2)
 
-        _, inf_full = model.inf_transform(Z, steps=40, lr=5e-3, optimizer="adam")
+        _, inf_full, _ = model.inf_transform(Z, steps=40, lr=5e-3, optimizer="adam")
 
         vals = []
         for i in range(0,32,8):
-            _, v = model.inf_transform(Z[i:i+8], steps=40, lr=5e-3, optimizer="adam")
+            _, v, _ = model.inf_transform(Z[i:i+8], steps=40, lr=5e-3, optimizer="adam")
             vals.append(v)
 
         inf_batched = torch.cat(vals)
@@ -397,6 +397,7 @@ class TestFiniteModelBatchConsistency(unittest.TestCase):
 
 class TestFiniteModelConvexityConcavity(unittest.TestCase):
     def test_convex_piecewise_linear(self):
+        torch.manual_seed(42)
         k = lambda x,y: (x*y).sum(-1)
         model = FiniteModel(5,1,k,mode="convex")
 
@@ -407,6 +408,7 @@ class TestFiniteModelConvexityConcavity(unittest.TestCase):
         self.assertTrue((sec >= -1e-4).all())
 
     def test_concave_piecewise_linear(self):
+        torch.manual_seed(43)
         k = lambda x,y: (x*y).sum(-1)
         model = FiniteModel(5,1,k,mode="concave")
 
@@ -425,8 +427,8 @@ class TestFiniteModelTransformImprovement(unittest.TestCase):
 
         Z = torch.randn(12,2)
 
-        _, v5 = model.sup_transform(Z, steps=5, lr=1e-2, optimizer="adam")
-        _, v50 = model.sup_transform(Z, steps=50, lr=1e-2, optimizer="adam")
+        _, v5, _ = model.sup_transform(Z, steps=5, lr=1e-2, optimizer="adam")
+        _, v50, _ = model.sup_transform(Z, steps=50, lr=1e-2, optimizer="adam")
 
         self.assertTrue((v50 >= v5 - 1e-5).all())
 

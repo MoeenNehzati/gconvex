@@ -89,7 +89,7 @@ class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
         Z = torch.randn(3, d, requires_grad=False)
         
         # Compute inf transform
-        X_opt, transform_vals = model.inf_transform(
+        X_opt, transform_vals, _ = model.inf_transform(
             Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
@@ -136,7 +136,7 @@ class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
         Z = torch.randn(3, d, requires_grad=False)
         
         # Compute sup transform
-        X_opt, transform_vals = model.sup_transform(
+        X_opt, transform_vals, _ = model.sup_transform(
             Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
@@ -200,7 +200,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         Z = torch.randn(3, d)
         
         # Compute inf transform with better convergence settings
-        X_opt, inf_val = model.inf_transform(
+        X_opt, inf_val, _ = model.inf_transform(
             Z, steps=200, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -247,7 +247,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         
         # Compute forward and sup transform with better convergence settings
         _, f_z = model.forward(Z, selection_mode="soft")
-        X_opt, sup_val = model.sup_transform(
+        X_opt, sup_val, _ = model.sup_transform(
             Z, steps=200, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -281,7 +281,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         Z = torch.randn(5, d)
         
         # Inf transform with gradient computation
-        X_opt, inf_vals = model.inf_transform(
+        X_opt, inf_vals, _ = model.inf_transform(
             Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
@@ -327,7 +327,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         sample_idx = torch.arange(10)
         
         # First call - should create warm start storage
-        X_opt1, vals1 = model.inf_transform(
+        X_opt1, vals1, _ = model.inf_transform(
             Z, sample_idx=sample_idx, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -342,7 +342,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         # Test deterministic behavior with same inputs
         torch.manual_seed(42)  # Reset seed
         model2 = FiniteModel(num_candidates, d, kernel, mode="convex")
-        X_opt1b, vals1b = model2.inf_transform(
+        X_opt1b, vals1b, _ = model2.inf_transform(
             Z, sample_idx=sample_idx, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         # Should get identical results with same seed
@@ -356,7 +356,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         warm_before = model._warm_X_global[subset_idx].clone()
         
         # Run with subset - should use stored warm starts
-        X_opt_subset, vals_subset = model.inf_transform(
+        X_opt_subset, vals_subset, _ = model.inf_transform(
             Z_subset, sample_idx=subset_idx, steps=10, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -395,7 +395,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         sample_idx = torch.arange(10)
         
         # First call - should initialize warm starts
-        X_opt1, vals1 = model.sup_transform(
+        X_opt1, vals1, _ = model.sup_transform(
             Z, sample_idx=sample_idx, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -408,7 +408,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         warm_starts_saved = model._warm_X_global.clone()
         
         # Second call - should use warm starts  
-        X_opt2, vals2 = model.sup_transform(
+        X_opt2, vals2, _ = model.sup_transform(
             Z, sample_idx=sample_idx, steps=20, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
@@ -423,14 +423,14 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         torch.manual_seed(456)
         model3 = FiniteModel(num_candidates, d, kernel, mode="convex")
         Z_test = torch.randn(5, d)
-        _, vals3a = model3.sup_transform(
+        _, vals3a, _ = model3.sup_transform(
             Z_test, steps=50, lr=1e-2, optimizer="adam"
         )
         
         torch.manual_seed(456)
         model4 = FiniteModel(num_candidates, d, kernel, mode="convex")
         Z_test2 = torch.randn(5, d)
-        _, vals3b = model4.sup_transform(
+        _, vals3b, _ = model4.sup_transform(
             Z_test2, steps=50, lr=1e-2, optimizer="adam"
         )
         
@@ -469,8 +469,8 @@ class TestFiniteModelTransformConsistency(unittest.TestCase):
         Z = torch.randn(5, d)
         
         # Both should produce finite values with good convergence
-        _, inf_vals = model.inf_transform(Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6)
-        _, sup_vals = model.sup_transform(Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6)
+        _, inf_vals, _ = model.inf_transform(Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6)
+        _, sup_vals, _ = model.sup_transform(Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6)
         
         self.assertTrue(torch.isfinite(inf_vals).all())
         self.assertTrue(torch.isfinite(sup_vals).all())
@@ -495,12 +495,12 @@ class TestFiniteModelTransformConsistency(unittest.TestCase):
         # First run
         torch.manual_seed(42)
         model1 = FiniteModel(num_candidates, d, kernel, mode="convex")
-        _, vals1 = model1.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
+        _, vals1, _ = model1.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
         
         # Second run with same seed
         torch.manual_seed(42)
         model2 = FiniteModel(num_candidates, d, kernel, mode="convex")
-        _, vals2 = model2.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
+        _, vals2, _ = model2.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
         
         # Should produce identical results
         self.assertTrue(torch.allclose(vals1, vals2, atol=1e-6))
@@ -522,7 +522,7 @@ class TestFiniteModelTransformOptimizers(unittest.TestCase):
         model = FiniteModel(5, d, kernel, mode="convex")
         Z = torch.randn(3, d)
         
-        X_opt, vals = model.inf_transform(Z, steps=20, lr=1.0, optimizer="lbfgs")
+        X_opt, vals, _ = model.inf_transform(Z, steps=20, lr=1.0, optimizer="lbfgs")
         
         self.assertTrue(torch.isfinite(vals).all())
         self.assertTrue(torch.isfinite(X_opt).all())
@@ -538,7 +538,7 @@ class TestFiniteModelTransformOptimizers(unittest.TestCase):
         model = FiniteModel(5, d, kernel, mode="convex")
         Z = torch.randn(3, d)
         
-        X_opt, vals = model.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
+        X_opt, vals, _ = model.inf_transform(Z, steps=50, lr=1e-2, optimizer="adam")
         
         self.assertTrue(torch.isfinite(vals).all())
         self.assertTrue(torch.isfinite(X_opt).all())
@@ -554,7 +554,7 @@ class TestFiniteModelTransformOptimizers(unittest.TestCase):
         model = FiniteModel(5, d, kernel, mode="convex")
         Z = torch.randn(3, d)
         
-        X_opt, vals = model.sup_transform(Z, steps=100, lr=1e-2, optimizer="gd")
+        X_opt, vals, _ = model.sup_transform(Z, steps=100, lr=1e-2, optimizer="gd")
         
         self.assertTrue(torch.isfinite(vals).all())
         self.assertTrue(torch.isfinite(X_opt).all())

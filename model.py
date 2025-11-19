@@ -166,11 +166,27 @@ class FiniteModel(nn.Module):
     # ============================================================
 
     def sup_transform(self, Z, sample_idx=None, **kw):
-        """ Compute sup_x [k(x,z) - f(x)] for each z. """
+        """ 
+        Compute sup_x [k(x,z) - f(x)] for each z.
+        
+        Returns:
+            tuple: (X_opt, values, converged) where
+                - X_opt: Optimized positions (detached)
+                - values: Transform values (with gradients)
+                - converged: Boolean indicating if optimization converged
+        """
         return self._transform_core(Z, sample_idx, maximize=True, **kw)
 
     def inf_transform(self, Z, sample_idx=None, **kw):
-        """ Compute inf_x [k(x,z) - f(x)] for each z. """
+        """ 
+        Compute inf_x [k(x,z) - f(x)] for each z.
+        
+        Returns:
+            tuple: (X_opt, values, converged) where
+                - X_opt: Optimized positions (detached)
+                - values: Transform values (with gradients)
+                - converged: Boolean indicating if optimization converged
+        """
         return self._transform_core(Z, sample_idx, maximize=False, **kw)
 
 

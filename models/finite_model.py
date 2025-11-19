@@ -166,11 +166,27 @@ class FiniteModel(nn.Module):
     # ============================================================
 
     def sup_transform(self, Z, sample_idx=None, **kw):
-        """ Compute sup_x [k(x,z) - f(x)] for each z. """
+        """ 
+        Compute sup_x [k(x,z) - f(x)] for each z.
+        
+        Returns:
+            tuple: (X_opt, values, converged) where
+                - X_opt: Optimized positions (detached)
+                - values: Transform values (with gradients)
+                - converged: Boolean indicating if optimization converged
+        """
         return self._transform_core(Z, sample_idx, maximize=True, **kw)
 
     def inf_transform(self, Z, sample_idx=None, **kw):
-        """ Compute inf_x [k(x,z) - f(x)] for each z. """
+        """ 
+        Compute inf_x [k(x,z) - f(x)] for each z.
+        
+        Returns:
+            tuple: (X_opt, values, converged) where
+                - X_opt: Optimized positions (detached)
+                - values: Transform values (with gradients)
+                - converged: Boolean indicating if optimization converged
+        """
         return self._transform_core(Z, sample_idx, maximize=False, **kw)
 
 
@@ -197,9 +213,21 @@ class FiniteModel(nn.Module):
 
         Supports random mini-batching through sample_idx,
         enabling per-datapoint warm-start reuse.
+        
+        Returns:
+            tuple: (X_opt, values, converged) where
+                - X_opt: Optimized positions (detached)
+                - values: Transform values (with gradients)
+                - converged: Boolean indicating if optimization converged
+                  
+        Convergence Detection:
+            - LBFGS: Always considered converged (uses internal line search)
+            - Adam/GD: Converged if |loss[i] - loss[i-1]| < tol for any step i
+            - If max steps reached without meeting tolerance, converged=False
         """
         num_samples, num_dims = Z.shape
         device = Z.device
+        converged = False  # Track convergence
 
         # -------------------------------------------------------------
         # Allocate GLOBAL warm-start storage if first call
@@ -244,6 +272,8 @@ class FiniteModel(nn.Module):
                 line_search_fn="strong_wolfe"
             )
             optim_obj.step(lambda: self._closure_x(X_var, Z, maximize, lam, optim_obj))
+            # LBFGS: consider converged if it completed without errors
+            converged = True
 
         else:
             if opt_name == "adam":
@@ -254,12 +284,17 @@ class FiniteModel(nn.Module):
                 raise ValueError(f"Unknown optimizer {optimizer}")
 
             prev = None
-            for _ in range(steps):
+            for i in range(steps):
                 loss = self._closure_x(X_var, Z, maximize, lam, optim_obj)
                 optim_obj.step()
                 if prev is not None and abs(prev - loss.item()) < tol:
+                    converged = True
                     break
                 prev = loss.item()
+            
+            # If loop completed without break, didn't converge
+            if not converged:
+                converged = False
 
         # -------------------------------------------------------------
         # Compute transform value and save warm starts
@@ -278,4 +313,4 @@ class FiniteModel(nn.Module):
         k_x_z = self.kernel_fn(X_var, Z)
         values = k_x_z - f_x
 
-        return X_var.detach(), values
+        return X_var.detach(), values, converged

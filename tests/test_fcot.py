@@ -274,7 +274,7 @@ class TestDualConstraints(unittest.TestCase):
             
             # Compute conjugate for Y points
             idx_y = torch.arange(len(Y))
-            _, fc_vals = model.sup_transform(
+            _, fc_vals, _ = model.sup_transform(
                 Z=Y,
                 sample_idx=idx_y,
                 steps=20,
@@ -684,10 +684,10 @@ class TestInnerLoopConvergence(unittest.TestCase):
         
         # Run sup_transform with many steps
         with torch.no_grad():
-            _, val_few = model.sup_transform(
+            _, val_few, _ = model.sup_transform(
                 Z=Z, sample_idx=idx, steps=5, optimizer="lbfgs"
             )
-            _, val_many = model.sup_transform(
+            _, val_many, _ = model.sup_transform(
                 Z=Z, sample_idx=idx, steps=50, optimizer="lbfgs"
             )
         
@@ -749,7 +749,7 @@ class TestWarmStart(unittest.TestCase):
         
         # First call should allocate buffers
         with torch.no_grad():
-            _, _ = model.sup_transform(
+            _, _, _ = model.sup_transform(
                 Z=Y, sample_idx=idx_y, steps=5, optimizer="lbfgs"
             )
         
@@ -774,9 +774,9 @@ class TestWarmStart(unittest.TestCase):
         
         # First call initializes warm-start
         with torch.no_grad():
-            _, val1 = model.sup_transform(Z=Y, sample_idx=idx, steps=10, optimizer="lbfgs")
+            _, val1, _ = model.sup_transform(Z=Y, sample_idx=idx, steps=10, optimizer="lbfgs")
             # Second call uses warm-start, may continue optimizing
-            _, val2 = model.sup_transform(Z=Y, sample_idx=idx, steps=10, optimizer="lbfgs")
+            _, val2, _ = model.sup_transform(Z=Y, sample_idx=idx, steps=10, optimizer="lbfgs")
         
         # With warm-start, second call should give at least as good result
         # (or very similar if already converged)
