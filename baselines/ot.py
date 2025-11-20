@@ -82,7 +82,8 @@ class OT:
             print_every=50,
             callback=None,
             convergence_tol=1e-4,
-            convergence_patience=50):
+            convergence_patience=50,
+            batch_size=512):
         """
         Internal fit function that does not handle caching/resuming.
         
@@ -97,6 +98,7 @@ class OT:
             callback: Optional callback(iteration) called each iteration
             convergence_tol: Relative tolerance for convergence detection
             convergence_patience: Number of checks before declaring convergence
+            batch_size: Mini-batch size for stochastic training
             
         Returns:
             logs: dict with training metrics
@@ -112,7 +114,8 @@ class OT:
             callback=None,
             force_retrain=False,
             convergence_tol=1e-4,
-            convergence_patience=50):
+            convergence_patience=50,
+            batch_size=None):
         """
         Full-batch ICNN-OT training with:
         - caching by architecture+data hash
@@ -129,6 +132,7 @@ class OT:
             force_retrain: If True, ignore cached checkpoints
             convergence_tol: Relative change threshold for convergence
             convergence_patience: Number of checks before stopping
+            batch_size: Mini-batch size for training. If None, uses full batch (len(X))
         """
 
         # --------------------------------------------------------
@@ -141,6 +145,11 @@ class OT:
 
         X = X.to(self.device)
         Y = Y.to(self.device)
+        
+        # Set batch_size to full batch if None
+        if batch_size is None:
+            batch_size = X.shape[0]
+        
         # --------------------------------------------------------
         # Compute save location
         # --------------------------------------------------------
@@ -166,7 +175,7 @@ class OT:
             else:
                 logger.info(f"[TRAIN] No checkpoint found at `{address}`. Training from scratch.")
 
-        logs = self._fit(X, Y, iters_done, iters, inner_steps, print_every, callback, convergence_tol, convergence_patience)
+        logs = self._fit(X, Y, iters_done, iters, inner_steps, print_every, callback, convergence_tol, convergence_patience, batch_size)
         # --------------------------------------------------------
         # Save checkpoint
         # --------------------------------------------------------

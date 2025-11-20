@@ -174,6 +174,7 @@ class FiniteModel(nn.Module):
         optimizer: str = "lbfgs",
         lam: float = 1e-3,
         tol: float = 1e-3,
+        patience: int = 5,
     ):
         """
         Main routine for sup_x or inf_x:
@@ -310,6 +311,7 @@ class FiniteModel(nn.Module):
                 optimizer,
                 lam,
                 tol,
+                patience,
                 *list(self.parameters())
             )
             

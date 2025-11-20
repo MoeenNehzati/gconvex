@@ -57,6 +57,7 @@ Example:
 import torch
 from torch.autograd import Function
 from torch.func import functional_call
+from tools.feedback import logger
 
 class InfConvolution(Function):
     """
@@ -71,7 +72,7 @@ class InfConvolution(Function):
     the optimization loop, making it efficient and numerically stable.
     """
     @staticmethod
-    def forward(ctx, y, f_net, K, x_init, solver_steps=30, lr=1e-1, optimizer="gd", lam=0.0, tol=1e-6, *params):
+    def forward(ctx, y, f_net, K, x_init, solver_steps=30, lr=1e-1, optimizer="gd", lam=0.0, tol=1e-6, patience=5, *params):
         """
         Forward pass: Solve the optimization problem to compute g(y) = inf_x [K(x,y) - f(x)].
         
@@ -105,6 +106,9 @@ class InfConvolution(Function):
             tol (float, optional): Tolerance for early stopping. Optimization stops when
                 relative change in objective is less than tol. Default: 1e-6.
                 Formula: |obj_val - prev_obj| / (|prev_obj| + 1e-10) < tol
+            patience (int, optional): Number of consecutive steps with rel_change < tol required
+                before declaring convergence. Helps avoid premature stopping with Adam/GD.
+                Default: 5. Only applies to Adam/GD, not LBFGS.
             *params: Network parameters from f_net.parameters(). Needed for gradient tracking
                 in the backward pass. Automatically extracted if not provided.
         
@@ -144,6 +148,9 @@ class InfConvolution(Function):
         with torch.enable_grad():
             if opt_name == "lbfgs":
                 # LBFGS closure - compute objective and gradients
+                # Track the number of function evaluations (not iterations)
+                lbfgs_state = {'n_eval': 0, 'last_loss': None}
+                
                 def closure():
                     if x_var.grad is not None:
                         x_var.grad.zero_()
@@ -156,6 +163,10 @@ class InfConvolution(Function):
                     # Compute gradients wrt x only (params are detached)
                     obj.backward()
                     
+                    # Track function evaluations
+                    lbfgs_state['n_eval'] += 1
+                    lbfgs_state['last_loss'] = obj.item()
+                    
                     return obj
                 
                 optim_obj = torch.optim.LBFGS(
@@ -166,9 +177,75 @@ class InfConvolution(Function):
                     tolerance_change=tol,
                     line_search_fn="strong_wolfe"
                 )
+                
+                # Step returns None, but LBFGS stops early if it converges
                 optim_obj.step(closure)
-                # LBFGS handles its own convergence internally
-                converged = True  # Assume converged if LBFGS completes
+                
+                # Check for NaN/Inf in final result
+                with torch.no_grad():
+                    k_val = K(x_var, y)
+                    f_val = functional_call(f_net, params_dict, (x_var,))
+                    final_obj = k_val - f_val + 0.5 * lam * x_var.pow(2).sum()
+                    
+                    if torch.isnan(final_obj) or torch.isinf(final_obj):
+                        logger.error(
+                            f"[InfConvolution] LBFGS optimization diverged: "
+                            f"objective={final_obj.item()}, x_norm={x_var.norm().item():.2e}"
+                        )
+                        raise RuntimeError(
+                            f"LBFGS optimization produced NaN/Inf: objective={final_obj.item()}, "
+                            f"x_norm={x_var.norm().item():.2e}. Try reducing lr or increasing lam."
+                        )
+                    
+                    if torch.isnan(x_var).any() or torch.isinf(x_var).any():
+                        logger.error(
+                            f"[InfConvolution] LBFGS optimization produced invalid x_var: "
+                            f"contains NaN or Inf"
+                        )
+                        raise RuntimeError(
+                            "LBFGS optimization produced NaN/Inf in x_var. "
+                            "Try reducing lr or increasing lam."
+                        )
+                
+                # LBFGS convergence: check gradient norm and function value convergence
+                # Don't just rely on iteration count - LBFGS can stop for many reasons
+                state = optim_obj.state[optim_obj.param_groups[0]['params'][0]]
+                n_iter = state.get('n_iter', 0) if state else 0
+                
+                # Check final gradient norm
+                # Need to create a fresh variable for gradient check since x_var will be detached
+                x_check = x_var.detach().clone().requires_grad_(True)
+                k_val = K(x_check, y)
+                f_val = functional_call(f_net, params_dict, (x_check,))
+                check_obj = k_val - f_val + 0.5 * lam * x_check.pow(2).sum()
+                check_obj.backward()
+                final_grad_norm = x_check.grad.norm().item()
+                
+                # Converged if: (1) used < max_iter AND (2) gradient is small enough
+                # Gradient tolerance check: grad_norm < tol * (1 + |obj|)
+                grad_converged = final_grad_norm < tol * (1.0 + abs(final_obj.item()))
+                iter_stopped_early = n_iter < solver_steps
+                
+                converged = iter_stopped_early and grad_converged
+                
+                if not converged:
+                    if not iter_stopped_early:
+                        # Used all iterations
+                        logger.warning(
+                            f"[InfConvolution] LBFGS did not converge after {n_iter} iterations "
+                            f"({lbfgs_state['n_eval']} function evaluations). "
+                            f"Final objective: {final_obj.item():.6e}, grad_norm: {final_grad_norm:.6e}, "
+                            f"tol: {tol:.2e}. Consider increasing solver_steps (current: {solver_steps})."
+                        )
+                    else:
+                        # Stopped early but gradient still large
+                        logger.warning(
+                            f"[InfConvolution] LBFGS stopped early at {n_iter} iterations but did not converge. "
+                            f"Final objective: {final_obj.item():.6e}, grad_norm: {final_grad_norm:.6e}, "
+                            f"tol: {tol:.2e}. The problem may be ill-conditioned. "
+                            f"Consider: (1) increasing lam for regularization, (2) relaxing tol, "
+                            f"or (3) using a different optimizer."
+                        )
             else:
                 if opt_name == "adam":
                     optim_obj = torch.optim.Adam([x_var], lr=lr)
@@ -176,6 +253,8 @@ class InfConvolution(Function):
                     optim_obj = torch.optim.SGD([x_var], lr=lr)
                 
                 prev_obj = None
+                patience_counter = 0
+                rel_change = float('inf')  # Initialize for logging
                 for step in range(solver_steps):
                     optim_obj.zero_grad()
                     
@@ -189,18 +268,49 @@ class InfConvolution(Function):
                     
                     optim_obj.step()
                     
-                    # Check convergence based on relative change
+                    # Check for NaN/Inf
                     obj_val = obj.item()
+                    if torch.isnan(obj) or torch.isinf(obj):
+                        logger.error(
+                            f"[InfConvolution] {opt_name.upper()} optimization diverged at step {step}: "
+                            f"objective={obj_val}, x_norm={x_var.norm().item():.2e}"
+                        )
+                        raise RuntimeError(
+                            f"{opt_name.upper()} optimization produced NaN/Inf at step {step}: "
+                            f"objective={obj_val}, x_norm={x_var.norm().item():.2e}. "
+                            f"Try reducing lr (current: {lr:.2e}) or increasing lam (current: {lam:.2e})."
+                        )
+                    
+                    if torch.isnan(x_var).any() or torch.isinf(x_var).any():
+                        logger.error(
+                            f"[InfConvolution] {opt_name.upper()} optimization produced invalid x_var at step {step}"
+                        )
+                        raise RuntimeError(
+                            f"{opt_name.upper()} optimization produced NaN/Inf in x_var at step {step}. "
+                            f"Try reducing lr (current: {lr:.2e}) or increasing lam (current: {lam:.2e})."
+                        )
+                    
+                    # Check convergence based on relative change with patience
                     if prev_obj is not None:
                         rel_change = abs(obj_val - prev_obj) / (abs(prev_obj) + 1e-10)
                         if rel_change < tol:
-                            converged = True
-                            break
+                            patience_counter += 1
+                            if patience_counter >= patience:
+                                converged = True
+                                break
+                        else:
+                            patience_counter = 0  # Reset if change is above tolerance
                     prev_obj = obj_val
                     
                     # Mark as not converged if we completed all steps
                     if step == solver_steps - 1:
                         converged = False  # Did not converge early
+                        logger.warning(
+                            f"[InfConvolution] {opt_name.upper()} did not converge after {solver_steps} steps. "
+                            f"Final objective: {obj_val:.6e}, final rel_change: {rel_change if prev_obj else 'N/A':.6e}, "
+                            f"tol: {tol:.2e}, patience: {patience_counter}/{patience}. "
+                            f"Consider increasing solver_steps or relaxing tol."
+                        )
 
         x_star = x_var.detach()
 
@@ -255,7 +365,7 @@ class InfConvolution(Function):
         Returns:
             tuple: Gradients wrt all forward pass inputs, in the same order:
                 (grad_y, grad_f_net, grad_K, grad_x_init, grad_solver_steps, grad_lr,
-                 grad_optimizer, grad_lam, grad_tol, *grad_params)
+                 grad_optimizer, grad_lam, grad_tol, grad_patience, *grad_params)
                 
                 - grad_y: None (we don't compute gradients wrt input y)
                 - grad_f_net: None (not a tensor)
@@ -266,6 +376,7 @@ class InfConvolution(Function):
                 - grad_optimizer: None (string)
                 - grad_lam: None (hyperparameter)
                 - grad_tol: None (hyperparameter)
+                - grad_patience: None (hyperparameter)
                 - *grad_params: Tuple of gradients wrt each network parameter θ, computed as
                     -grad_output * ∂f(x*,θ)/∂θ
         
@@ -299,5 +410,5 @@ class InfConvolution(Function):
 
         # Return gradients in the same order as forward inputs
         # (grad_y, grad_f_net, grad_K, grad_x_init, grad_solver_steps, grad_lr, 
-        #  grad_optimizer, grad_lam, grad_tol, *grad_params)
-        return (None, None, None, None, None, None, None, None, None) + grad_theta
+        #  grad_optimizer, grad_lam, grad_tol, grad_patience, *grad_params)
+        return (None, None, None, None, None, None, None, None, None, None) + grad_theta

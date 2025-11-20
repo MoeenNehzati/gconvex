@@ -8,7 +8,7 @@ params = {
 }
 niters = 10000
 model_size = 1000
-inner_steps = 10
+inner_steps = 50
 lr = 1e-2
 inner_optimizer = "adam"
 batch_size = 512
