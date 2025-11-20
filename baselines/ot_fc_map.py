@@ -209,7 +209,7 @@ class FCOT(OT):
     # ----------------------------------------------------------------------
     # Dual objective on a given batch
     # ----------------------------------------------------------------------
-    def _dual_objective(self, X_batch, Y_batch, idx_y):
+    def _dual_objective(self, x_batch, y_batch, idx_y, active_inner_steps=None):
         """
         Compute on a minibatch:
 
@@ -219,17 +219,25 @@ class FCOT(OT):
           - u is represented by self.model.forward
           - u^c is computed by self.model.inf_transform
 
-        Y_batch must be accompanied by idx_y (global indices into Y)
+        y_batch must be accompanied by idx_y (global indices into Y)
         so that FiniteModel can use per-sample warm starts for LBFGS/Adam.
+        
+        Args:
+            x_batch, y_batch: Minibatch data
+            idx_y: Global indices for y_batch
+            active_inner_steps: Override for inner optimization steps (uses self.inner_steps if None)
         """
+        # Use parent's helper to determine active steps
+        steps = self._get_active_inner_steps(active_inner_steps)
+        
         # u(X)
-        _, u_vals = self.model.forward(X_batch, selection_mode="soft")
+        _, u_vals = self.model.forward(x_batch, selection_mode="soft")
 
         # u^c(Y): numerical inf_x [ c(x,y) - u(x) ]
         _, uc_vals, converged = self.model.inf_transform(
-            Z=Y_batch,
+            Z=y_batch,
             sample_idx=idx_y,                # <--- crucial for warm-start
-            steps=self.inner_steps,
+            steps=steps,
             lr=self.inner_lr,                # <--- separate inner LR (tunable)
             optimizer=self.inner_optimizer,
             lam=self.inner_lam,
@@ -239,7 +247,7 @@ class FCOT(OT):
         # Warn if inner optimization didn't converge
         if not converged:
             logger.warning(
-                f"[FCOT] Inner optimization did not converge with {self.inner_steps} steps "
+                f"[FCOT] Inner optimization did not converge with {steps} steps "
                 f"(optimizer={self.inner_optimizer}, lr={self.inner_lr:.2e}, tol={self.inner_tol:.2e}). "
                 f"Consider increasing inner_steps or relaxing inner_tol."
             )
@@ -254,16 +262,21 @@ class FCOT(OT):
     # ----------------------------------------------------------------------
     # One stochastic dual step
     # ----------------------------------------------------------------------
-    def _step(self, X_batch, Y_batch, idx_y):
+    def step(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
         """
         Perform one stochastic gradient step w.r.t. D on a minibatch.
 
         We *maximize* D, hence do gradient ascent: -D.backward() is equivalent to
         ascending on D.
+        
+        Args:
+            x_batch, y_batch: Minibatch data
+            idx_y: Global indices for y_batch (for warm-start)
+            active_inner_steps: Override for inner optimization steps
         """
         self.optimizer.zero_grad()
 
-        D, u_mean, uc_mean = self._dual_objective(X_batch, Y_batch, idx_y)
+        D, u_mean, uc_mean = self._dual_objective(x_batch, y_batch, idx_y, active_inner_steps)
         # Maximize D by minimizing -D
         loss = -D
         loss.backward()
@@ -308,36 +321,82 @@ class FCOT(OT):
 
 
     # ----------------------------------------------------------------------
+    # Checkpoint save/load for training resumption
+    # ----------------------------------------------------------------------
+    def save(self, address, iters_done):
+        """Save model state and training progress."""
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'iters_done': iters_done,
+        }, address)
+
+    def load(self, address):
+        """Load model state and return iterations completed."""
+        checkpoint = torch.load(address, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        return checkpoint.get('iters_done', 0)
+
+    def debug_losses(self, X, Y):
+        """
+        Compute diagnostic metrics on full datasets.
+        
+        Returns:
+            list: Diagnostic information (currently empty for FCOT)
+        """
+        # For consistency with parent interface
+        # Could add dual objective value, convergence info, etc.
+        return []
+
+
+    # ----------------------------------------------------------------------
     # Training loop: this is what OT.fit(...) will call
     # ----------------------------------------------------------------------
     def _fit(
         self,
         X,
         Y,
-        batch_size: int = 512,
+        iters_done: int = 0,
         iters: int = 2000,
+        inner_steps: int = 5,
         print_every: int = 50,
         callback=None,
         convergence_tol: float = 1e-4,
         convergence_patience: int = 50,
+        batch_size: int = 512,  # FCOT-specific parameter
     ):
         """
         Stochastic training of the Kantorovich dual using random minibatches.
 
         X, Y: full datasets (num_x, dim), (num_y, dim).
         This method is called by OT.fit(...).
+        
+        Args:
+            X, Y: Training data tensors
+            iters_done: Number of iterations already completed (for resuming)
+            iters: Total iterations to run
+            inner_steps: Steps for inner conjugate solver. If provided,
+                         overrides self.inner_steps for this training run.
+            print_every: Logging frequency
+            callback: Optional callback function
+            convergence_tol: Relative tolerance for convergence detection
+            convergence_patience: Number of checks before declaring convergence
+            batch_size: Size of mini-batches for stochastic training
 
         Returns:
-            logs: dict with keys "dual", "f", "g" tracking training trajectory.
+            logs: dict with keys "dual_obj", "converged" tracking training trajectory.
         """
         X = X.to(self.device)
         Y = Y.to(self.device)
         nX, nY = X.shape[0], Y.shape[0]
 
-        logs = {"dual": [], "u": [], "uc": []}
+        # Use parent's helper to determine active inner_steps
+        active_inner_steps = self._get_active_inner_steps(inner_steps)
+
+        logs = {"dual_obj": [], "converged": []}
 
         prev_dual = None
         patience = 0
+        converged_flag = False
 
         for it in range(iters):
             # -------------------------------------------------------
@@ -349,16 +408,15 @@ class FCOT(OT):
             Xb = X[idx_x]
             Yb = Y[idx_y]
 
-            stats = self._step(Xb, Yb, idx_y)
+            stats = self.step(Xb, Yb, idx_y, active_inner_steps)
 
             # -------------------------------------------------------
             # Logging and convergence check
             # -------------------------------------------------------
             if it % print_every == 0:
                 dual = stats["dual"]
-                logs["dual"].append(dual)
-                logs["u"].append(stats["u_mean"])
-                logs["uc"].append(stats["uc_mean"])
+                logs["dual_obj"].append(dual)
+                logs["converged"].append(converged_flag)
 
                 logger.debug(
                     f"[Iter {it}] dual={dual:.6f} "
@@ -377,11 +435,16 @@ class FCOT(OT):
                             f"[CONVERGED] dual rel change < {convergence_tol} "
                             f"for {convergence_patience} checks."
                         )
+                        converged_flag = True
                         break
 
                 prev_dual = dual
 
             if callback is not None:
                 callback(it)
+
+        # Mark final convergence status
+        if logs["converged"]:
+            logs["converged"][-1] = converged_flag
 
         return logs

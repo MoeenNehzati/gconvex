@@ -54,6 +54,25 @@ class OT:
         # loads the models and itersdone from address with torch.load and returns iters_done
         return 0
     
+    def _get_active_inner_steps(self, inner_steps):
+        """
+        Helper to determine which inner_steps value to use.
+        
+        Args:
+            inner_steps: Value passed to fit/inner optimization.
+                        If None, falls back to self.inner_steps if available.
+        
+        Returns:
+            int: The active inner_steps value to use.
+        """
+        if inner_steps is not None:
+            return inner_steps
+        # Fall back to instance attribute if it exists
+        if hasattr(self, 'inner_steps'):
+            return self.inner_steps
+        # Default fallback
+        return 5
+    
     def _fit(self,
             X,
             Y,
@@ -64,7 +83,24 @@ class OT:
             callback=None,
             convergence_tol=1e-4,
             convergence_patience=50):
-        # internal fit function that does not handle caching/resuming
+        """
+        Internal fit function that does not handle caching/resuming.
+        
+        Args:
+            X, Y: Training data
+            iters_done: Number of iterations already completed
+            iters: Total iterations to run
+            inner_steps: Number of steps for inner optimization loops.
+                         Subclasses may use this to override their default
+                         inner_steps value when not None.
+            print_every: Logging frequency
+            callback: Optional callback(iteration) called each iteration
+            convergence_tol: Relative tolerance for convergence detection
+            convergence_patience: Number of checks before declaring convergence
+            
+        Returns:
+            logs: dict with training metrics
+        """
         return {}
         
     def fit(self,
@@ -82,6 +118,17 @@ class OT:
         - caching by architecture+data hash
         - checkpoint resume
         - early stopping by W2 convergence
+        
+        Args:
+            X, Y: Training data (numpy arrays or tensors)
+            iters: Number of training iterations
+            inner_steps: Steps for inner optimization. If provided, overrides
+                         the default value set during initialization.
+            print_every: Log metrics every N iterations
+            callback: Optional function(iter) called each iteration
+            force_retrain: If True, ignore cached checkpoints
+            convergence_tol: Relative change threshold for convergence
+            convergence_patience: Number of checks before stopping
         """
 
         # --------------------------------------------------------

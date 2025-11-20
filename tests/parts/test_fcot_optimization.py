@@ -79,7 +79,7 @@ class TestNumericalStability(TimedTestCase):
         
         logs = fcot._fit(X, Y, batch_size=30, iters=30, print_every=10)
         
-        duals = logs["dual"]
+        duals = logs["dual_obj"]
         
         # With stochastic minibatching, dual can fluctuate significantly
         # Just check that optimization runs and produces valid values
@@ -183,7 +183,7 @@ class TestInnerLoopConvergence(TimedTestCase):
             
             # Should run without error
             logs = fcot._fit(X, Y, batch_size=10, iters=5, print_every=100)
-            self.assertGreater(len(logs["dual"]), 0)
+            self.assertGreater(len(logs["dual_obj"]), 0)
 
 
 class TestWarmStart(TimedTestCase):

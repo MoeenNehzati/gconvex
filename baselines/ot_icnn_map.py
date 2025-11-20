@@ -368,6 +368,9 @@ class ICNNOT(OT):
         # --------------------------------------------------------
         logs = {"f_losses": [], "g_losses": [], "W2": []}
 
+        # Use parent's helper to determine active inner_steps
+        active_inner_steps = self._get_active_inner_steps(inner_steps)
+
         prev_w2 = None
         convergence_counter = 0
 
@@ -377,7 +380,7 @@ class ICNNOT(OT):
             # ---------------------------
             # g steps
             # ---------------------------
-            for _ in range(inner_steps):
+            for _ in range(active_inner_steps):
                 self.step_g(X, Y)
 
             # ---------------------------
@@ -432,7 +435,6 @@ class ICNNOT(OT):
             },
             address
         )
-        return super().save(address, iters_done)
 
     def load(self, address):
         data = torch.load(address, map_location=self.device)

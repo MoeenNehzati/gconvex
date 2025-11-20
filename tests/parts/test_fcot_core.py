@@ -430,7 +430,7 @@ class TestMinibatchCorrectness(TimedTestCase):
         initial_params = [p.clone() for p in fcot.model.parameters()]
         
         # Take a step
-        stats = fcot._step(X, Y, idx_y)
+        stats = fcot.step(X, Y, idx_y)
         
         # Check that at least one parameter changed
         changed = False
@@ -500,7 +500,7 @@ class TestEdgeCases(TimedTestCase):
         
         # Should handle high dimensions
         logs = fcot._fit(X, Y, batch_size=15, iters=10, print_every=100)
-        self.assertGreater(len(logs["dual"]), 0)
+        self.assertGreater(len(logs["dual_obj"]), 0)
 
     def test_zero_inner_steps_raises_or_handles(self):
         """Test behavior with zero inner steps."""

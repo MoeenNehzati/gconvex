@@ -121,9 +121,9 @@ class TestInvariance(TimedTestCase):
         
         # Final dual values should be similar (OT cost is translation-invariant for L2)
         # Note: Due to stochastic optimization and minibatching, we test general behavior
-        if logs1["dual"] and logs2["dual"]:
-            dual1 = logs1["dual"][-1]
-            dual2 = logs2["dual"][-1]
+        if logs1["dual_obj"] and logs2["dual_obj"]:
+            dual1 = logs1["dual_obj"][-1]
+            dual2 = logs2["dual_obj"][-1]
             # Both should be in similar range (order of magnitude)
             # Just check that both completed without errors
             self.assertIsInstance(dual1, (int, float))
@@ -164,14 +164,14 @@ class TestStochasticRobustness(TimedTestCase):
         logs = fcot._fit(X, Y, batch_size=10, iters=30, print_every=20)
         
         # Should still converge
-        self.assertGreater(len(logs["dual"]), 0)
+        self.assertGreater(len(logs["dual_obj"]), 0)
         
         # Check improvement
-        if len(logs["dual"]) > 1:
-            improvement = logs["dual"][-1] - logs["dual"][0]
+        if len(logs["dual_obj"]) > 1:
+            improvement = logs["dual_obj"][-1] - logs["dual_obj"][0]
             # With small batches and fewer iterations, dual can fluctuate significantly
             # Just verify it produces valid values and shows some variation
-            self.assertTrue(all(not np.isnan(d) for d in logs["dual"]))
+            self.assertTrue(all(not np.isnan(d) for d in logs["dual_obj"]))
 
     def test_convergence_patience_mechanism(self):
         """Test that convergence patience mechanism works correctly."""
@@ -208,9 +208,9 @@ class TestStochasticRobustness(TimedTestCase):
         )
         
         # Just check that it runs and produces logs
-        self.assertGreater(len(logs["dual"]), 0)
+        self.assertGreater(len(logs["dual_obj"]), 0)
         # Check all values are finite
-        for d in logs["dual"]:
+        for d in logs["dual_obj"]:
             self.assertFalse(np.isnan(d))
             self.assertFalse(np.isinf(d))
 

@@ -213,6 +213,55 @@ class GNOTOT(OT):
             return self.T(X)
 
     # ------------------------------------------------------------
+    # Single optimization step (matching parent OT interface)
+    # ------------------------------------------------------------
+    def step(self, x_batch, y_batch):
+        """
+        Perform one combined T+D optimization step.
+        
+        This matches the parent OT.step() interface but performs
+        the full GNOT training step (T optimization + D optimization).
+        
+        Args:
+            x_batch, y_batch: Minibatch data
+            
+        Returns:
+            dict: Training metrics (T_loss, D_loss, mean_cost)
+        """
+        # Optimize T (generator)
+        self.T.train()
+        self.D.eval()
+        
+        last_T_loss = None
+        for _ in range(self.T_ITERS):
+            self.T_opt.zero_grad()
+            T_X = self.T(x_batch)
+            T_loss = self.cost(x_batch, T_X).mean() - self.D(T_X).mean()
+            T_loss.backward()
+            self.T_opt.step()
+            last_T_loss = T_loss.detach().item()
+        
+        # Optimize D (critic)
+        self.T.eval()
+        self.D.train()
+        
+        with torch.no_grad():
+            T_X = self.T(x_batch)
+        
+        self.D_opt.zero_grad()
+        D_loss = self.D(T_X).mean() - self.D(y_batch).mean()
+        D_loss.backward()
+        self.D_opt.step()
+        
+        average_cost = self.cost(x_batch, T_X).mean().item()
+        
+        return {
+            "T_loss": last_T_loss,
+            "D_loss": D_loss.detach().item(),
+            "mean_cost": average_cost
+        }
+
+    # ------------------------------------------------------------
     # Logging helper
     # ------------------------------------------------------------
     def debug_losses(self, X, Y):
@@ -252,12 +301,17 @@ class GNOTOT(OT):
         self, X, Y,
         iters_done=0,
         iters=10000,
-        inner_steps=5,             # not used (NOT uses T_ITERS instead)
+        inner_steps=5,             # not used by GNOT (uses self.T_ITERS instead)
         print_every=50,
         callback=None,
         convergence_tol=1e-4,
         convergence_patience=50
     ):
+        """Train GNOT using alternating T and D optimization.
+        
+        Note: inner_steps parameter is not used by GNOT, which uses
+        self.T_ITERS instead for the number of generator steps.
+        """
 
         N_X = X.shape[0]
         N_Y = Y.shape[0]
@@ -268,51 +322,26 @@ class GNOTOT(OT):
 
         logs = {"T_loss": [], "D_loss": [], "mean_cost": []}
 
-        for step in range(iters_done, iters):
-
-            # ------------------------------------------------
-            # (1) Optimize T (generator): inner T_ITERS steps
-            # ------------------------------------------------
-            self.T.train()
-            self.D.eval()
-
-            last_T_loss = None
-            for _ in range(self.T_ITERS):
-                Xb = minibatch(X)
-                self.T_opt.zero_grad()
-
-                T_X = self.T(Xb)
-                T_loss = self.cost(Xb, T_X).mean() - self.D(T_X).mean()  # identical to NOT
-                T_loss.backward()
-                self.T_opt.step()
-
-                last_T_loss = T_loss.detach().item()
-
-            # ------------------------------------------------
-            # (2) Optimize D (critic): 1 step
-            # ------------------------------------------------
-            self.T.eval()
-            self.D.train()
-
+        for step_idx in range(iters_done, iters):
+            # Sample minibatches
             Xb = minibatch(X)
             Yb = minibatch(Y)
-
-            with torch.no_grad():
-                T_X = self.T(Xb)
-
-            self.D_opt.zero_grad()
-            D_loss = self.D(T_X).mean() - self.D(Yb).mean()      # identical to NOT
-            D_loss.backward()
-            self.D_opt.step()
-            average_cost = self.cost(Xb, T_X).mean().item()
-            logs["T_loss"].append(last_T_loss)
-            logs["D_loss"].append(D_loss.detach().item())
-            logs["mean_cost"].append(average_cost)
+            
+            # Perform one combined optimization step
+            metrics = self.step(Xb, Yb)
+            
+            # Log metrics
+            logs["T_loss"].append(metrics["T_loss"])
+            logs["D_loss"].append(metrics["D_loss"])
+            logs["mean_cost"].append(metrics["mean_cost"])
 
             if callback:
-                callback(step, logs)
+                callback(step_idx, logs)
 
-            if print_every and step % print_every == 0:
-                logger.debug(f"[step {step}] T_loss={last_T_loss:.4f}  D_loss={float(D_loss):.4f}  mean_cost={average_cost:.4f}")
+            if print_every and step_idx % print_every == 0:
+                logger.debug(
+                    f"[step {step_idx}] T_loss={metrics['T_loss']:.4f}  "
+                    f"D_loss={metrics['D_loss']:.4f}  mean_cost={metrics['mean_cost']:.4f}"
+                )
 
         return logs
