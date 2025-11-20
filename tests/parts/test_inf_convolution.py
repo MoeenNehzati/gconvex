@@ -51,6 +51,7 @@ import torch.nn as nn
 import unittest
 import torch
 from models import InfConvolution
+from tests import TimedTestCase
 
 
 # ============================================================================
@@ -113,7 +114,7 @@ def K2(x, y):
 # Test Cases
 # ============================================================================
 
-class TestInfConvolution(unittest.TestCase):
+class TestInfConvolution(TimedTestCase):
     """
     Comprehensive test suite for InfConvolution operation.
     

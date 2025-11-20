@@ -19,11 +19,12 @@ Quick start
 -----------
 1. Install dependencies:
 
-<!-- ```bash
-python -m pip install torch matplotlib numpy
+```bash
+pip install -e .                    # Install package
+pip install -e ".[dev]"             # Install with dev dependencies (includes pytest)
 # optional: wandb if you want experiment tracking
-python -m pip install wandb
-``` -->
+pip install -e ".[wandb]"
+```
 
 2. Configure experiments in `config.py`
 
@@ -69,6 +70,40 @@ Key shapes / conventions
 - `sample`: Tensor (S, n) where S is the sample size and n is the number of goods(dimension of Y)
 - Model `compute_mechanism(sample)` returns a dict with entries used by logging and evaluation: `choice`, `v`, `profits`, `kernel`, `y`, `intercept`.
 - Checkpoints are saved as `{writing_dir}/{run_id}_epoch_{epoch}.pt` and the final artifact is `{writing_dir}/{run_id}_final.pt`.
+
+Testing
+-------
+The test suite is organized into unit tests (`tests/parts/`) and integration tests (`tests/integration/`).
+
+Install test dependencies:
+```bash
+pip install pytest pytest-xdist pytest-timeout
+# OR install with the package: pip install -e ".[dev]"
+```
+
+Run all tests in parallel:
+```bash
+pytest tests/ -n auto                # Parallel (recommended, auto-detect CPUs)
+pytest tests/ -n 4                   # Parallel with 4 workers
+pytest tests/                        # Sequential
+
+# If using a virtual environment and pytest isn't finding modules:
+python -m pytest tests/ -n auto      # Use Python from current environment
+```
+
+Run specific test groups:
+```bash
+pytest tests/parts/ -n auto          # Only unit tests (fast)
+pytest tests/integration/            # Only integration tests (slow)
+pytest tests/parts/test_finite_model.py -v  # Specific module
+```
+
+Alternatively, use unittest:
+```bash
+python -m unittest discover -s tests/parts  # Fast unit tests only
+```
+
+See `tests/PERFORMANCE.md` for more details on test optimization and parallel execution.
 
 Checkpoints and resuming
 ------------------------

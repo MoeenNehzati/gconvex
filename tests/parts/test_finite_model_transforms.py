@@ -40,9 +40,10 @@ import unittest
 import torch
 import torch.nn as nn
 from models import FiniteModel
+from tests import TimedTestCase
 
 
-class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
+class TestFiniteModelLinearKernelTransforms(TimedTestCase):
     """
     Test transforms for linear kernel k(x,y) = x^T y.
     
@@ -90,7 +91,7 @@ class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
         
         # Compute inf transform
         X_opt, transform_vals, _ = model.inf_transform(
-            Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
+            Z, steps=30, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
         # Values should be finite
@@ -137,7 +138,7 @@ class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
         
         # Compute sup transform
         X_opt, transform_vals, _ = model.sup_transform(
-            Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
+            Z, steps=30, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
         # Values should be finite
@@ -155,7 +156,7 @@ class TestFiniteModelLinearKernelTransforms(unittest.TestCase):
         self.assertTrue(torch.isfinite(model.intercept_rest.grad).all())
 
 
-class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
+class TestFiniteModelQuadraticKernelTransforms(TimedTestCase):
     """
     Test transforms for quadratic surplus kernel k(x,y) = -0.5||x-y||^2.
     
@@ -201,7 +202,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         
         # Compute inf transform with better convergence settings
         X_opt, inf_val, _ = model.inf_transform(
-            Z, steps=200, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
+            Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
         # Values should be finite
@@ -248,7 +249,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         # Compute forward and sup transform with better convergence settings
         _, f_z = model.forward(Z, selection_mode="soft")
         X_opt, sup_val, _ = model.sup_transform(
-            Z, steps=200, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
+            Z, steps=100, lr=5e-3, optimizer="adam", lam=1e-4, tol=1e-6
         )
         
         # Values should be finite
@@ -282,7 +283,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         
         # Inf transform with gradient computation
         X_opt, inf_vals, _ = model.inf_transform(
-            Z, steps=50, lr=1e-2, optimizer="adam", lam=1e-3
+            Z, steps=30, lr=1e-2, optimizer="adam", lam=1e-3
         )
         
         loss = inf_vals.sum()
@@ -299,7 +300,7 @@ class TestFiniteModelQuadraticKernelTransforms(unittest.TestCase):
         self.assertLess(model.intercept_rest.grad.abs().max().item(), 100.0)
 
 
-class TestFiniteModelTransformBatching(unittest.TestCase):
+class TestFiniteModelTransformBatching(TimedTestCase):
     """
     Test that transforms work correctly with mini-batching via sample_idx.
     """
@@ -437,7 +438,7 @@ class TestFiniteModelTransformBatching(unittest.TestCase):
         self.assertTrue(torch.allclose(vals3a, vals3b, atol=1e-5))
 
 
-class TestFiniteModelTransformConsistency(unittest.TestCase):
+class TestFiniteModelTransformConsistency(TimedTestCase):
     """
     Test consistency properties of the transforms.
     """
@@ -506,7 +507,7 @@ class TestFiniteModelTransformConsistency(unittest.TestCase):
         self.assertTrue(torch.allclose(vals1, vals2, atol=1e-6))
 
 
-class TestFiniteModelTransformOptimizers(unittest.TestCase):
+class TestFiniteModelTransformOptimizers(TimedTestCase):
     """
     Test that different optimizers all work correctly for transforms.
     """

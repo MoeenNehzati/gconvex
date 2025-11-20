@@ -12,9 +12,10 @@ import logging
 from baselines.ot_fc_map import FCOT
 from tools.utils import L22, inverse_grad_L22
 from tools.feedback import logger
+from tests import TimedTestCase
 
 
-class TestFCOTConvergenceWarnings(unittest.TestCase):
+class TestFCOTConvergenceWarnings(TimedTestCase):
     """Test that FCOT warns when inner optimization doesn't converge."""
     
     def setUp(self):
@@ -183,7 +184,7 @@ class TestFCOTConvergenceWarnings(unittest.TestCase):
                           "Expected multiple convergence warnings during fit")
 
 
-class TestFiniteModelConvergenceDetection(unittest.TestCase):
+class TestFiniteModelConvergenceDetection(TimedTestCase):
     """Test convergence detection in FiniteModel transforms."""
     
     def setUp(self):

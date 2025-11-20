@@ -1,16 +1,22 @@
+"""
+Core unit tests for FiniteModel class.
+
+Tests the basic functionality of FiniteModel including:
+- Initialization with various configurations
+- Forward pass behavior and shapes
+- Metric properties
+- Convexity and concavity guarantees
+
+These tests are fast (<1s each) and test individual model components.
+"""
+
 import unittest
 import torch
-import random
 from models import FiniteModel
+from tests import TimedTestCase
 
 
-#######################################################################
-# =====================================================================
-#  ORIGINAL TEST SUITE (UNCHANGED)
-# =====================================================================
-#######################################################################
-
-class TestFiniteModelInitialization(unittest.TestCase):
+class TestFiniteModelInitialization(TimedTestCase):
     """Test suite for FiniteModel initialization."""
     
     def test_convex_initialization(self):
@@ -117,7 +123,7 @@ class TestFiniteModelInitialization(unittest.TestCase):
             )
 
 
-class TestFiniteModelForward(unittest.TestCase):
+class TestFiniteModelForward(TimedTestCase):
     def setUp(self):
         torch.manual_seed(42)
         self.quad = lambda x, y: -((x - y)**2).sum(dim=-1)
@@ -180,7 +186,7 @@ class TestFiniteModelForward(unittest.TestCase):
         torch.testing.assert_close(fx, expected)
 
 
-class TestFiniteModelMetricProperties(unittest.TestCase):
+class TestFiniteModelMetricProperties(TimedTestCase):
     def setUp(self):
         torch.manual_seed(42)
 
@@ -239,163 +245,7 @@ class TestFiniteModelMetricProperties(unittest.TestCase):
         self.assertTrue(torch.isfinite(supv).all())
 
 
-class TestFiniteModelOptimization(unittest.TestCase):
-    def test_lbfgs(self):
-        k = lambda x, y: -((x - y)**2).sum(-1)
-        model = FiniteModel(5, 2, k)
-        Z = torch.randn(4,2)
-        Xs, vals, _ = model.sup_transform(Z, steps=20, lr=1e-1, optimizer="lbfgs")
-        self.assertEqual(Xs.shape, (4,2))
-        self.assertTrue(torch.isfinite(vals).all())
-
-    def test_adam(self):
-        k = lambda x, y: (x * y).sum(-1)
-        model = FiniteModel(5, 2, k)
-        Z = torch.randn(4,2)
-        Xs, vals, _ = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="adam")
-        self.assertEqual(Xs.shape, (4,2))
-        self.assertTrue(torch.isfinite(vals).all())
-
-    def test_gd(self):
-        k = lambda x, y: -((x - y)**2).sum(-1)
-        model = FiniteModel(5,2,k,mode="concave")
-        Z = torch.randn(3,2)
-        Xs, vals, _ = model.inf_transform(Z, steps=100, lr=1e-2, optimizer="gd")
-        self.assertEqual(Xs.shape, (3,2))
-
-
-#######################################################################
-# =====================================================================
-#  NEW TESTS (UPDATED FOR NEW WARM-START SYSTEM)
-# =====================================================================
-#######################################################################
-
-class TestFiniteModelWarmStartBehavior(unittest.TestCase):
-
-    def test_warm_start_reuse_same_batch(self):
-        torch.manual_seed(0)
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(10, 2, k)
-
-        Z = torch.randn(32,2)
-
-        # cold
-        _, v1, _ = model.sup_transform(Z, steps=5, optimizer="adam", lr=5e-3)
-
-        self.assertTrue(hasattr(model, "_warm_X_fallback"))
-        self.assertEqual(model._warm_X_fallback.shape, (32,2))
-
-        # warm
-        _, v2, _ = model.sup_transform(Z, steps=3, optimizer="adam", lr=5e-3)
-        self.assertTrue(torch.allclose(v1, v2, atol=5e-2, rtol=1e-3))
-
-
-    def test_warm_start_resets_if_batch_size_changes(self):
-        torch.manual_seed(0)
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(5,2,k)
-
-        Z1 = torch.randn(20,2)
-        model.sup_transform(Z1)
-        self.assertEqual(model._warm_X_fallback.shape,(20,2))
-
-        Z2 = torch.randn(10,2)
-        model.sup_transform(Z2)
-        self.assertEqual(model._warm_X_fallback.shape,(10,2))
-
-
-    def test_warm_start_does_not_leak_between_models(self):
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        m1 = FiniteModel(4,2,k)
-        m2 = FiniteModel(4,2,k)
-
-        Z = torch.randn(12,2)
-
-        m1.sup_transform(Z)
-
-        # m2 should be clean
-        self.assertFalse(hasattr(m2, "_warm_X_fallback"))
-        self.assertIsNone(m2._warm_X_global)
-
-
-    def test_warm_start_subset_batching(self):
-        torch.manual_seed(0)
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(6,2,k)
-
-        Z = torch.randn(30,2)
-
-        idx_full = torch.arange(0,30)
-        model.sup_transform(Z, sample_idx=idx_full)
-
-        self.assertEqual(model._warm_X_global.shape,(30,2))
-
-        idx_subset = torch.tensor(random.sample(range(30),15))
-        Z_small = Z[idx_subset]
-
-        _, v_small, _ = model.sup_transform(Z_small, sample_idx=idx_subset)
-
-        self.assertTrue(torch.isfinite(v_small).all())
-        self.assertEqual(model._warm_X_global.shape,(30,2))
-        self.assertEqual(model._warm_X_global[idx_subset].shape,(15,2))
-
-
-#######################################################################
-# Stability / batch consistency / transform tests
-#######################################################################
-
-class TestFiniteModelStability(unittest.TestCase):
-
-    def test_softmin_large_values(self):
-        k = lambda x,y: (x*y).sum(-1)
-        m = FiniteModel(5,3,k,mode="concave")
-        X = torch.randn(8,3)*1000
-        c, fx = m.forward(X,"soft")
-        self.assertTrue(torch.isfinite(fx).all())
-        self.assertTrue(torch.isfinite(c).all())
-
-    def test_temp_scaling(self):
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        m = FiniteModel(7,2,k,temp=1e6)
-        X = torch.randn(10,2)
-        _, fx = m.forward(X,"soft")
-        self.assertTrue(torch.isfinite(fx).all())
-
-
-class TestFiniteModelBatchConsistency(unittest.TestCase):
-    def test_forward_batch_consistency(self):
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(10,2,k)
-
-        X = torch.randn(40,2)
-        X1 = X[:20]
-        X2 = X[20:]
-
-        _, f_full = model.forward(X)
-        _, f1 = model.forward(X1)
-        _, f2 = model.forward(X2)
-
-        torch.testing.assert_close(f_full, torch.cat([f1,f2]))
-
-    def test_inf_sup_batched_vs_full(self):
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(8,2,k)
-
-        Z = torch.randn(32,2)
-
-        _, inf_full, _ = model.inf_transform(Z, steps=40, lr=5e-3, optimizer="adam")
-
-        vals = []
-        for i in range(0,32,8):
-            _, v, _ = model.inf_transform(Z[i:i+8], steps=40, lr=5e-3, optimizer="adam")
-            vals.append(v)
-
-        inf_batched = torch.cat(vals)
-        self.assertTrue(torch.isfinite(inf_batched).all())
-        self.assertTrue(torch.allclose(inf_batched, inf_full, atol=0.15))
-
-
-class TestFiniteModelConvexityConcavity(unittest.TestCase):
+class TestFiniteModelConvexityConcavity(TimedTestCase):
     def test_convex_piecewise_linear(self):
         torch.manual_seed(42)
         k = lambda x,y: (x*y).sum(-1)
@@ -417,25 +267,6 @@ class TestFiniteModelConvexityConcavity(unittest.TestCase):
 
         sec = f[2:] - 2*f[1:-1] + f[:-2]
         self.assertTrue((sec <= 1e-4).all())
-
-
-class TestFiniteModelTransformImprovement(unittest.TestCase):
-    def test_sup_transform_improves(self):
-        torch.manual_seed(0)
-        k = lambda x,y: -((x-y)**2).sum(-1)
-        model = FiniteModel(6,2,k)
-
-        Z = torch.randn(12,2)
-
-        _, v5, _ = model.sup_transform(Z, steps=5, lr=1e-2, optimizer="adam")
-        _, v50, _ = model.sup_transform(Z, steps=50, lr=1e-2, optimizer="adam")
-
-        self.assertTrue((v50 >= v5 - 1e-5).all())
-
-
-#######################################################################
-# END FULL SUITE
-#######################################################################
 
 
 if __name__ == "__main__":

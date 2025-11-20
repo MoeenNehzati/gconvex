@@ -40,7 +40,12 @@ setup(
         "ipython>=7.0.0",
     ],
     extras_require={
-        "dev": ["pytest", "flake8"],
+        "dev": [
+            "pytest>=7.0.0",
+            "pytest-xdist>=3.0.0",  # Parallel test execution
+            "pytest-timeout>=2.0.0",  # Test timeouts
+            "flake8",
+        ],
         "wandb": ["wandb"],
     },
     license="Apache-2.0",

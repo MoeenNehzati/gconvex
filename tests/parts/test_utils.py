@@ -12,9 +12,10 @@ import unittest
 import torch
 import numpy as np
 from tools.utils import moded_max, moded_min, _to_serializable, hash_dict
+from tests import TimedTestCase
 
 
-class TestModedMax(unittest.TestCase):
+class TestModedMax(TimedTestCase):
     """Test suite for moded_max function."""
     
     def setUp(self):
@@ -154,7 +155,7 @@ class TestModedMax(unittest.TestCase):
             moded_max(self.scores, self.candidates, dim=0)
 
 
-class TestModedMin(unittest.TestCase):
+class TestModedMin(TimedTestCase):
     """Test suite for moded_min function."""
     
     def setUp(self):
@@ -230,7 +231,7 @@ class TestModedMin(unittest.TestCase):
         self.assertTrue((scores.grad != 0).any())
 
 
-class TestToSerializable(unittest.TestCase):
+class TestToSerializable(TimedTestCase):
     """Test suite for _to_serializable function."""
     
     def test_scalar_torch_tensor(self):
@@ -348,7 +349,7 @@ class TestToSerializable(unittest.TestCase):
         self.assertEqual(result, [1.0, 2.0])
 
 
-class TestHashDict(unittest.TestCase):
+class TestHashDict(TimedTestCase):
     """Test suite for hash_dict function."""
     
     def test_deterministic_hashing(self):
