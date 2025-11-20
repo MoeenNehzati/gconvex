@@ -46,8 +46,9 @@ Example:
     >>> fnet = LinearF(3)
     >>> y = torch.randn(3)
     >>> x0 = torch.zeros(3)
-    >>> g, converged = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+    >>> g, converged, x_star = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
     >>> print(f"g(y) = {g.item():.4f}, converged = {converged}")
+    >>> print(f"Optimal x: {x_star}")
     >>> 
     >>> # Compute gradients
     >>> g.backward()
@@ -108,11 +109,13 @@ class InfConvolution(Function):
                 in the backward pass. Automatically extracted if not provided.
         
         Returns:
-            tuple: (g, converged) where:
+            tuple: (g, converged, x_star) where:
                 - g (torch.Tensor): Scalar value of inf_x [K(x,y) - f(x)]
                 - converged (bool): Whether optimization converged before reaching solver_steps.
                     True if relative change fell below tol, False otherwise.
                     For LBFGS, always returns True (uses internal convergence criteria).
+                - x_star (torch.Tensor): Optimal x that achieves the minimum (detached).
+                    Useful for warm-starting subsequent optimizations.
         
         Notes:
             - The forward pass does NOT accumulate gradients in f_net parameters.
@@ -211,10 +214,12 @@ class InfConvolution(Function):
         with torch.no_grad():
             g = K(x_star, y) - f_net(x_star)
         
-        return g, converged
+        # Return g, converged, and x_star (for warm-starting)
+        # x_star is detached so it doesn't affect gradients
+        return g, converged, x_star
 
     @staticmethod
-    def backward(ctx, grad_output, grad_converged):
+    def backward(ctx, grad_output, grad_converged, grad_x_star):
         """
         Backward pass: Compute gradients using implicit differentiation via envelope theorem.
         
@@ -245,6 +250,7 @@ class InfConvolution(Function):
             grad_output (torch.Tensor): Gradient of loss wrt g (scalar). This is typically 1.0
                 when g is the final loss, or the upstream gradient in a larger computation.
             grad_converged: Gradient wrt converged flag (always None, since it's a boolean).
+            grad_x_star: Gradient wrt x_star (always None since it's detached).
         
         Returns:
             tuple: Gradients wrt all forward pass inputs, in the same order:

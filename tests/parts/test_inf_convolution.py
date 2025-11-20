@@ -162,7 +162,7 @@ class TestInfConvolution(TimedTestCase):
         self.assertIsNone(fnet.a.grad)
         self.assertIsNone(fnet.b.grad)
 
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         
         # After forward, parameters should still have no gradients
         self.assertIsNone(fnet.a.grad)
@@ -227,7 +227,7 @@ class TestInfConvolution(TimedTestCase):
         # Check that parameters don't accumulate gradients during forward
         self.assertIsNone(fnet.theta.grad)
 
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         
         # After forward, parameters should still have no gradients
         self.assertIsNone(fnet.theta.grad)
@@ -273,7 +273,7 @@ class TestInfConvolution(TimedTestCase):
         for i in range(batch_size):
             fnet_copy = LinearF(d)
             fnet_copy.load_state_dict(fnet.state_dict())
-            g_i, _ = InfConvolution.apply(Y[i], fnet_copy, K2, x0[i], 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet_copy.parameters()))
+            g_i, _, _ = InfConvolution.apply(Y[i], fnet_copy, K2, x0[i], 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet_copy.parameters()))
             g_individual.append(g_i.item())
         
         # All should be different (different y values)
@@ -303,14 +303,14 @@ class TestInfConvolution(TimedTestCase):
         x0 = torch.zeros(d)
         
         # First backward
-        g1, _ = InfConvolution.apply(y1, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g1, _, _ = InfConvolution.apply(y1, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         g1.backward()
         
         grad_a_1 = fnet.a.grad.clone()
         grad_b_1 = fnet.b.grad.clone()
         
         # Second backward (should accumulate)
-        g2, _ = InfConvolution.apply(y2, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g2, _, _ = InfConvolution.apply(y2, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         g2.backward()
         
         # Gradients should have accumulated
@@ -353,7 +353,7 @@ class TestInfConvolution(TimedTestCase):
             else:  # gd
                 steps, lr = 1000, 1e-1
             
-            g, _ = InfConvolution.apply(y, fnet, K2, x0, steps, lr, opt_name, 0.0, 1e-6, *list(fnet.parameters()))
+            g, _, _ = InfConvolution.apply(y, fnet, K2, x0, steps, lr, opt_name, 0.0, 1e-6, *list(fnet.parameters()))
             g.backward()
             
             results[opt_name] = {
@@ -379,11 +379,11 @@ class TestInfConvolution(TimedTestCase):
         x0 = torch.zeros(d)
         
         # Without regularization
-        g_no_reg, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g_no_reg, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         
         # With regularization
         fnet2 = QuadraticF(theta_init=0.3)
-        g_reg, _ = InfConvolution.apply(y, fnet2, K2, x0, 100, 1.0, "lbfgs", 1e-2, 1e-6, *list(fnet2.parameters()))
+        g_reg, _, _ = InfConvolution.apply(y, fnet2, K2, x0, 100, 1.0, "lbfgs", 1e-2, 1e-6, *list(fnet2.parameters()))
         
         # Results should be different
         self.assertNotAlmostEqual(g_no_reg.item(), g_reg.item(), places=3)
@@ -406,7 +406,7 @@ class TestInfConvolution(TimedTestCase):
         y = torch.randn(d)
         x0 = torch.zeros(d)
         
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         g.backward()
         
         # Should still compute meaningful gradients
@@ -426,7 +426,7 @@ class TestInfConvolution(TimedTestCase):
         y = torch.randn(d)
         x0 = torch.zeros(d)
         
-        g, _ = InfConvolution.apply(y, fnet, K_linear, x0, 100, 1.0, "lbfgs", 1e-3, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K_linear, x0, 100, 1.0, "lbfgs", 1e-3, 1e-6, *list(fnet.parameters()))
         
         # Should not error and produce finite result
         self.assertTrue(torch.isfinite(g))
@@ -459,7 +459,7 @@ class TestInfConvolution(TimedTestCase):
         for p in fnet.parameters():
             self.assertIsNone(p.grad)
         
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         
         # Still no gradients after forward
         for p in fnet.parameters():
@@ -480,7 +480,7 @@ class TestInfConvolution(TimedTestCase):
         y = torch.randn(d)
         x0 = torch.zeros(d)
         
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 100, 1.0, "lbfgs", 0.0, 1e-6, *list(fnet.parameters()))
         g.backward()
         
         # Verify gradients have correct shape
@@ -525,7 +525,7 @@ class TestInfConvolution(TimedTestCase):
         x0 = torch.zeros(d)
         
         # Compute analytical gradient
-        g, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
+        g, _, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
         g.backward()
         
         grad_a_analytical = fnet.a.grad.clone()
@@ -540,11 +540,11 @@ class TestInfConvolution(TimedTestCase):
         
         # Forward perturbation
         fnet.a.data[0] = a_orig + eps
-        g_plus, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
+        g_plus, _, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
         
         # Backward perturbation
         fnet.a.data[0] = a_orig - eps
-        g_minus, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
+        g_minus, _, _ = InfConvolution.apply(y, fnet, K2, x0, 200, 1.0, "lbfgs", 0.0, 1e-8, *list(fnet.parameters()))
         
         # Restore
         fnet.a.data[0] = a_orig
@@ -592,7 +592,7 @@ class TestInfConvolution(TimedTestCase):
             self.assertIsNone(fnet_test.b.grad)
             
             # Run forward pass
-            g, converged = InfConvolution.apply(
+            g, converged, _ = InfConvolution.apply(
                 y, fnet_test, K2, x0, steps, lr, opt_name, 0.0, 1e-6, 
                 *list(fnet_test.parameters())
             )

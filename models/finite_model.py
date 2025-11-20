@@ -2,6 +2,7 @@ from typing import Optional
 from torch import nn
 import torch
 from tools.utils import moded_max, moded_min
+from models.inf_convolution import InfConvolution
 # =====================================================================
 # FiniteModel: unified finitely-convex / finitely-concave representation
 # =====================================================================
@@ -131,37 +132,6 @@ class FiniteModel(nn.Module):
 
 
     # ============================================================
-    # INTERNAL: closure for sup/inf optimization
-    # ============================================================
-
-    def _closure_x(self, X_var, Z, maximize, lam, optimizer_obj):
-        """
-        Closure for optimizing x → k(x,z) - f(x).
-
-        maximize=True → sup
-        maximize=False → inf
-        """
-        optimizer_obj.zero_grad()
-
-        # f(x)
-        _, f_x = self.forward(X_var, selection_mode="soft")
-
-        # k(x,z)
-        k_x_z = self.kernel_fn(X_var, Z)
-
-        obj = (k_x_z - f_x).mean()
-        reg = 0.5 * lam * (X_var.pow(2).sum(dim=-1)).mean()
-
-        if maximize:
-            loss = -(obj - reg)
-        else:
-            loss = obj + reg
-
-        loss.backward()
-        return loss
-
-
-    # ============================================================
     # PUBLIC sup/inf transforms (batch-aware sample_idx added)
     # ============================================================
 
@@ -208,11 +178,13 @@ class FiniteModel(nn.Module):
         """
         Main routine for sup_x or inf_x:
 
-            maximize=True  → sup_x
+            maximize=True  → sup_x (negated inf)
             maximize=False → inf_x
 
         Supports random mini-batching through sample_idx,
         enabling per-datapoint warm-start reuse.
+        
+        Uses InfConvolution for implicit differentiation.
         
         Returns:
             tuple: (X_opt, values, converged) where
@@ -227,7 +199,6 @@ class FiniteModel(nn.Module):
         """
         num_samples, num_dims = Z.shape
         device = Z.device
-        converged = False  # Track convergence
 
         # -------------------------------------------------------------
         # Allocate GLOBAL warm-start storage if first call
@@ -256,61 +227,109 @@ class FiniteModel(nn.Module):
             # Fallback: no sample_idx → use Z as initialization
             X_init = Z.clone()
 
-        X_var = X_init.detach().clone().requires_grad_(True)
-
         # -------------------------------------------------------------
-        # Optimizer selection
+        # Create a wrapper module for f(x) to work with InfConvolution
+        # InfConvolution expects f_net(x) to return scalar value
+        # and x will be a 1D tensor of shape (num_dims,)
         # -------------------------------------------------------------
-        opt_name = optimizer.lower()
-        if opt_name == "lbfgs":
-            optim_obj = torch.optim.LBFGS(
-                [X_var],
-                lr=lr,
-                max_iter=steps,
-                tolerance_grad=tol,
-                tolerance_change=tol,
-                line_search_fn="strong_wolfe"
-            )
-            optim_obj.step(lambda: self._closure_x(X_var, Z, maximize, lam, optim_obj))
-            # LBFGS: consider converged if it completed without errors
-            converged = True
-
-        else:
-            if opt_name == "adam":
-                optim_obj = torch.optim.Adam([X_var], lr=lr)
-            elif opt_name == "gd":
-                optim_obj = torch.optim.SGD([X_var], lr=lr)
-            else:
-                raise ValueError(f"Unknown optimizer {optimizer}")
-
-            prev = None
-            for i in range(steps):
-                loss = self._closure_x(X_var, Z, maximize, lam, optim_obj)
-                optim_obj.step()
-                if prev is not None and abs(prev - loss.item()) < tol:
-                    converged = True
-                    break
-                prev = loss.item()
+        class FWrapper(nn.Module):
+            def __init__(self, finite_model, negate=False):
+                super().__init__()
+                self.finite_model = finite_model
+                self.negate = negate
             
-            # If loop completed without break, didn't converge
-            if not converged:
-                converged = False
+            def forward(self, x):
+                # x is (num_dims,) - need to add batch dimension
+                # FiniteModel.forward expects (num_samples, num_dims)
+                if x.dim() == 1:
+                    x = x.unsqueeze(0)
+                # self.finite_model.forward returns (choice, f_x)
+                _, f_x = self.finite_model.forward(x, selection_mode="soft")
+                # f_x is (num_samples,) or scalar - return scalar
+                result = f_x.squeeze()
+                return -result if self.negate else result
+        
+        # -------------------------------------------------------------
+        # Define kernel function that handles maximize flag and dimensions
+        # InfConvolution expects K(x, y) where x and y are 1D tensors
+        # 
+        # For maximize=True (sup):
+        #   sup_x [k(x,z) - f(x)] = -inf_x [-(k(x,z) - f(x))]
+        #                         = -inf_x [f(x) - k(x,z)]
+        #   InfConvolution computes: inf_x [K(x,z) - F(x)]
+        #   So we need: K(x,z) = -k(x,z) and F(x) = -f(x)
+        #   Then: inf_x [-k(x,z) - (-f(x))] = inf_x [f(x) - k(x,z)]
+        #   And negate result: -inf_x [f(x) - k(x,z)] = sup_x [k(x,z) - f(x)]
+        # -------------------------------------------------------------
+        if maximize:
+            f_wrapper = FWrapper(self, negate=True)
+            
+            def K_wrapper(x, z):
+                # Ensure x and z are 2D for kernel_fn
+                if x.dim() == 1:
+                    x = x.unsqueeze(0)
+                if z.dim() == 1:
+                    z = z.unsqueeze(0)
+                result = -self.kernel_fn(x, z)
+                return result.squeeze()
+        else:
+            f_wrapper = FWrapper(self, negate=False)
+            
+            def K_wrapper(x, z):
+                # Ensure x and z are 2D for kernel_fn
+                if x.dim() == 1:
+                    x = x.unsqueeze(0)
+                if z.dim() == 1:
+                    z = z.unsqueeze(0)
+                result = self.kernel_fn(x, z)
+                return result.squeeze()
 
         # -------------------------------------------------------------
-        # Compute transform value and save warm starts
+        # Apply InfConvolution for each sample in Z
+        # InfConvolution now returns (g_value, converged, x_star) so we
+        # don't need to re-solve the optimization
+        # -------------------------------------------------------------
+        values_list = []
+        converged_list = []
+        X_opt_list = []
+
+        for i in range(num_samples):
+            z_i = Z[i]  # 1D tensor of shape (num_dims,)
+            x_init_i = X_init[i]  # 1D tensor of shape (num_dims,)
+            
+            # InfConvolution.apply returns (g_value, converged, x_star)
+            # This computes the value with proper gradients via implicit differentiation
+            # and returns the optimal x for warm-starting
+            g_i, conv_i, x_star_i = InfConvolution.apply(
+                z_i,
+                f_wrapper,
+                K_wrapper,
+                x_init_i,
+                steps,
+                lr,
+                optimizer,
+                lam,
+                tol,
+                *list(self.parameters())
+            )
+            
+            values_list.append(g_i)
+            converged_list.append(conv_i)
+            X_opt_list.append(x_star_i)
+        
+        values = torch.stack(values_list)
+        converged = all(converged_list)
+        X_opt = torch.stack(X_opt_list)
+        
+        # Negate values if maximize
+        if maximize:
+            values = -values
+
+        # -------------------------------------------------------------
+        # Save warm starts
         # -------------------------------------------------------------
         with torch.no_grad():
-            _, f_x_detached = self.forward(X_var)
-            k_x_z_detached = self.kernel_fn(X_var, Z)
-            
             if sample_idx is not None:
-                self._warm_X_global[sample_idx] = X_var.detach()
-            else:
-                self._warm_X_fallback = X_var.detach()
-        
-        # Compute values WITH gradients for backprop
-        _, f_x = self.forward(X_var)
-        k_x_z = self.kernel_fn(X_var, Z)
-        values = k_x_z - f_x
+                self._warm_X_global[sample_idx] = X_opt.detach()
 
-        return X_var.detach(), values, converged
+        return X_opt.detach(), values, converged
