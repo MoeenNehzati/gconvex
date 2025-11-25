@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from baselines.ot import OT
-from models import FiniteModel
+from models import FiniteModel, FiniteSeparableModel
 from tools.feedback import logger
 
 
@@ -70,7 +70,7 @@ class FCOT(OT):
         n_params_target: int,
         cost,                        # Cost function c(x,y)
         inverse_cx,                  # Inverse gradient: (x,p) ↦ y solving ∇_x c(x,y) = p
-        lr: float = 1e-3,
+        outer_lr: float = 1e-3,
         betas=(0.5, 0.9),
         device: str = "cpu",
         inner_optimizer: str = "lbfgs",
@@ -100,7 +100,7 @@ class FCOT(OT):
             Cost function c(X, Y) where X, Y have shape (batch, dim)
         inverse_cx : callable
             Maps (X, grad_c) → Y solving ∇_x c(X,Y) = grad_c
-        lr : float, default=1e-3
+        outer_lr : float, default=1e-3
             Learning rate for outer optimizer (Adam on model parameters)
         betas : tuple, default=(0.5, 0.9)
             Beta parameters for Adam optimizer
@@ -115,7 +115,7 @@ class FCOT(OT):
         inner_tol : float, default=1e-3
             Tolerance for inner solver convergence
         inner_lr : float or None, default=None
-            Learning rate for inner solver (defaults to outer lr if None)
+            Learning rate for inner solver (defaults to outer_lr if None)
         temp : float, default=50.0
             Temperature for soft selection mode
         is_cost_metric : bool, default=False
@@ -157,11 +157,17 @@ class FCOT(OT):
             temp=temp,
         ).to(device)
         
+        # Backwards compatibility: allow 'lr' in kwargs to override outer_lr
+        if 'lr' in kwargs and outer_lr == 1e-3:
+            # If user passed lr explicitly and did not override outer_lr, use it
+            outer_lr = kwargs.pop('lr')
+            logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
+
         return FCOT(
             input_dim=dim,
             model=model,
             inverse_cx=inverse_cx,
-            lr=lr,
+            outer_lr=outer_lr,
             betas=betas,
             device=device,
             inner_optimizer=inner_optimizer,
@@ -179,18 +185,25 @@ class FCOT(OT):
         input_dim: int,
         model: nn.Module,        # FiniteModel(mode="concave", kernel = c)
         inverse_cx,              # (x,p) ↦ y solving ∇_x c(x,y) = p
-        lr: float = 1e-3,
+        outer_lr: float = 1e-3,
+        lr: float | None = None,  # deprecated alias for outer_lr
         betas=(0.5, 0.9),
         device: str = "cpu",
         inner_optimizer: str = "lbfgs",
         inner_steps: int = 5,
         inner_lam: float = 1e-3,
         inner_tol: float = 1e-3,
-        inner_lr: float | None = None,   # NEW: separate LR for inner solver (optional)
-        inner_patience: int = 5,          # NEW: patience for inner convergence
-        raise_on_inner_divergence: bool = False,  # NEW: whether to raise error on convergence failure
+        inner_lr: float | None = None,   # separate LR for inner solver (optional)
+        inner_patience: int = 5,          # patience for inner convergence
+        raise_on_inner_divergence: bool = False,  # whether to raise error on convergence failure
     ):
         super().__init__()
+
+        # Backwards compatibility: allow deprecated `lr` positional/keyword
+        # If lr is provided and outer_lr was not explicitly changed, use it
+        if lr is not None and outer_lr == 1e-3:
+            outer_lr = lr
+            logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
 
         self.input_dim = input_dim
         self.model = model.to(device)
@@ -199,9 +212,9 @@ class FCOT(OT):
         self.inverse_cx = inverse_cx
 
         # Outer optimizer (on f parameters)
-        self.lr = lr
+        self.outer_lr = outer_lr
         self.betas = betas
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, betas=betas)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=outer_lr, betas=betas)
 
         # Inner conjugate solver hyperparams
         self.inner_optimizer = inner_optimizer
@@ -209,9 +222,13 @@ class FCOT(OT):
         self.inner_lam = inner_lam
         self.inner_tol = inner_tol
         self.inner_patience = inner_patience
-        # If inner_lr is None, fall back to outer lr (no behavior change)
-        self.inner_lr = lr if inner_lr is None else inner_lr
+        # If inner_lr is None, fall back to outer_lr (previous behavior)
+        self.inner_lr = outer_lr if inner_lr is None else inner_lr
         self.raise_on_inner_divergence = raise_on_inner_divergence
+
+    @property
+    def lr(self):  # backward compatibility for existing code expecting .lr
+        return self.outer_lr
 
 
     # ----------------------------------------------------------------------
@@ -388,132 +405,51 @@ class FCOT(OT):
         callback=None,
         convergence_tol: float = 1e-4,
         convergence_patience: int = 50,
-        batch_size: int = 512,  # FCOT-specific parameter
+        batch_size: int | None = 512,
+        eval_every=100,
+        warmup_steps=None,
+        warmup_until_converged=False,
+        log_every=None,
     ):
         """
         Stochastic training of the Kantorovich dual using random minibatches.
-
-        X, Y: full datasets (num_x, dim), (num_y, dim).
-        This method is called by OT.fit(...).
+        
+        This method delegates to the parent OT._fit() which handles all logging,
+        progress tracking, and convergence detection. FCOT only needs to implement
+        step() to provide per-iteration metrics.
         
         Args:
             X, Y: Training data tensors
             iters_done: Number of iterations already completed (for resuming)
             iters: Total iterations to run
-            inner_steps: Steps for inner conjugate solver. If provided,
-                         overrides self.inner_steps for this training run.
-            print_every: Logging frequency
+            inner_steps: Steps for inner conjugate solver
+            print_every: How often to update the Rich status panel
             callback: Optional callback function
             convergence_tol: Relative tolerance for convergence detection
             convergence_patience: Number of checks before declaring convergence
             batch_size: Size of mini-batches for stochastic training
+            eval_every: How often to evaluate on full dataset (iterations)
+            warmup_steps: Number of inner optimization steps for initial warm-up pass.
+                         If None, uses max(10, inner_steps). Set to 0 to disable warm-up.
+            warmup_until_converged: If True, run warm-up until all points converge.
+            log_every: How often to write debug logs. If None, debug logging is disabled.
 
         Returns:
-            logs: dict with keys "dual_obj", "converged" tracking training trajectory.
+            logs: dict with training metrics from parent OT._fit()
         """
-        X = X.to(self.device)
-        Y = Y.to(self.device)
-        nX, nY = X.shape[0], Y.shape[0]
-
-        # Use parent's helper to determine active inner_steps
-        active_inner_steps = self._get_active_inner_steps(inner_steps)
-
-        logs = {
-            "dual_obj": [],
-            "converged": [],
-            "inner_converged": [],  # Track inner optimization convergence
-            "inner_failures": 0,    # Count convergence failures
-        }
-
-        prev_dual = None
-        patience = 0
-        converged_flag = False
-        it = 0  # Initialize iteration counter
-
-        for it in range(iters):
-            # -------------------------------------------------------
-            # Sample random mini-batches for X and Y
-            # -------------------------------------------------------
-            idx_x = torch.randint(0, nX, (batch_size,), device=self.device)
-            idx_y = torch.randint(0, nY, (batch_size,), device=self.device)
-
-            Xb = X[idx_x]
-            Yb = Y[idx_y]
-
-            stats = self.step(Xb, Yb, idx_y, active_inner_steps)
-            
-            # Track inner convergence EVERY iteration (not just when printing)
-            logs["inner_converged"].append(stats["inner_converged"])
-            if not stats["inner_converged"]:
-                logs["inner_failures"] += 1
-
-            # -------------------------------------------------------
-            # Logging and convergence check
-            # -------------------------------------------------------
-            dual = stats["dual"]
-            
-            # Always check convergence (every iteration)
-            if prev_dual is not None:
-                rel = abs(dual - prev_dual) / (abs(prev_dual) + 1e-12)
-                if rel < convergence_tol:
-                    patience += 1
-                else:
-                    patience = 0
-                if patience >= convergence_patience:
-                    logger.info(
-                        f"[CONVERGED] dual rel change < {convergence_tol} "
-                        f"for {convergence_patience} checks."
-                    )
-                    converged_flag = True
-                    break
-            prev_dual = dual
-            
-            # Print diagnostics periodically
-            if it % print_every == 0:
-                logs["dual_obj"].append(dual)
-                logs["converged"].append(converged_flag)
-
-                logger.debug(
-                    f"[Iter {it}] dual={dual:.6f} "
-                    f"u={stats['u_mean']:.4f} "
-                    f"uc={stats['uc_mean']:.4f}"
-                )
-
-            if callback is not None:
-                callback(it)
-
-        # Mark final convergence status
-        if logs["converged"]:
-            logs["converged"][-1] = converged_flag
-        
-        # Report inner convergence statistics
-        total_iters = it + 1  # it is 0-indexed
-        failure_rate = (logs["inner_failures"] / total_iters) * 100
-        
-        if logs["inner_failures"] > 0:
-            logger.warning(
-                f"\n{'='*70}\n"
-                f"INNER OPTIMIZATION CONVERGENCE SUMMARY\n"
-                f"{'='*70}\n"
-                f"Optimizer: {self.inner_optimizer.upper()}\n"
-                f"Total iterations: {total_iters}\n"
-                f"Inner convergence failures: {logs['inner_failures']} ({failure_rate:.2f}%)\n"
-                f"Inner steps per iteration: {active_inner_steps}\n"
-                f"Inner learning rate: {self.inner_lr:.2e}\n"
-                f"Inner tolerance: {self.inner_tol:.2e}\n"
-                f"Inner lambda (regularization): {self.inner_lam:.2e}\n"
-                f"\n"
-                f"RECOMMENDATION: {'CRITICAL - High failure rate!' if failure_rate > 10 else 'Optimize inner solver settings'}\n"
-                f"  - Current failures compromise {failure_rate:.1f}% of training steps\n"
-                f"  - Consider: increasing inner_steps from {active_inner_steps} to {active_inner_steps * 2}+\n"
-                f"  - Or: relaxing inner_tol from {self.inner_tol:.2e} to {self.inner_tol * 10:.2e}\n"
-                f"  - Or: trying different inner_optimizer (current: {self.inner_optimizer})\n"
-                f"{'='*70}\n"
-            )
-        else:
-            logger.info(
-                f"[INNER OPTIMIZATION] All {total_iters} iterations converged successfully "
-                f"with {self.inner_optimizer.upper()} optimizer."
-            )
-
-        return logs
+        # Simply call parent's _fit which handles all the logging
+        return super()._fit(
+            X, Y,
+            iters_done=iters_done,
+            iters=iters,
+            inner_steps=inner_steps,
+            print_every=print_every,
+            callback=callback,
+            convergence_tol=convergence_tol,
+            convergence_patience=convergence_patience,
+            batch_size=batch_size,
+            eval_every=eval_every,
+            warmup_steps=warmup_steps,
+            warmup_until_converged=warmup_until_converged,
+            log_every=log_every,
+        )

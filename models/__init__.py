@@ -6,10 +6,12 @@ functions and computing infimal convolutions with implicit differentiation.
 
 Classes:
     - FiniteModel: Unified finite representation for convex/concave functions
+    - FiniteSeparableModel: Separable finite representation (efficient for product kernels)
     - InfConvolution: Differentiable infimal convolution operation
 """
 
-from .finite_model import FiniteModel
+from .finite_model import FiniteModel, FiniteSeparableModel
 from .inf_convolution import InfConvolution
+from .helpers import ZeroMean
 
-__all__ = ["FiniteModel", "InfConvolution"]
+__all__ = ["FiniteModel", "FiniteSeparableModel", "InfConvolution", "ZeroMean"]

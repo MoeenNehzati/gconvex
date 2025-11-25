@@ -48,7 +48,11 @@ fh = logging.handlers.RotatingFileHandler(
 )
 
 fh.setLevel(logging.INFO)
-handlers = [fh]
+run_log_handler = logging.FileHandler("run.log", mode="w")
+run_log_handler.setLevel(logging.DEBUG)
+run_log_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s'))
+
+handlers = [run_log_handler, fh]
 if IN_JUPYTER:
     handlers.append(log_capture_handler)
 else:

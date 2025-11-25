@@ -1,8 +1,1298 @@
+import torch
+from torch import nn
+from baselines.ot import OT
+import logging
+import math
+from tools.feedback import logger
+
+
+class TwoStageOptimizer(torch.optim.Optimizer):
+    """
+    Wrapper that runs Adam with a large learning rate until the gradient norm
+    exceeds a threshold (or a maximum warmup step count), then switches to SGD
+    with a steady learning rate for the remainder of training.
+    """
+
+    def __init__(
+        self,
+        params,
+        steady_lr: float,
+        warmup_lr: float,
+        betas=(0.5, 0.9),
+        grad_threshold: float = 0.5,
+        max_warm_steps: int = 200,
+        steady_momentum: float = 0.0,
+        steady_weight_decay: float = 0.0,
+    ):
+        if warmup_lr <= 0 or steady_lr <= 0:
+            raise ValueError("Learning rates must be positive.")
+        if grad_threshold <= 0:
+            raise ValueError("grad_threshold must be positive.")
+        if max_warm_steps <= 0:
+            raise ValueError("max_warm_steps must be positive.")
+        if steady_momentum < 0:
+            raise ValueError("steady_momentum must be non-negative.")
+        if steady_weight_decay < 0:
+            raise ValueError("steady_weight_decay must be non-negative.")
+
+        params = list(params)
+        if len(params) == 0:
+            raise ValueError("Optimizer received an empty parameter list.")
+
+        self._adam = torch.optim.Adam(params, lr=warmup_lr, betas=betas)
+        self._sgd = torch.optim.SGD(
+            params,
+            lr=steady_lr,
+            momentum=steady_momentum,
+            weight_decay=steady_weight_decay,
+        )
+        self.warm_lr = warmup_lr
+        self.steady_lr = steady_lr
+        self.grad_threshold = grad_threshold
+        self.max_warm_steps = max_warm_steps
+        self.steady_momentum = steady_momentum
+        self.steady_weight_decay = steady_weight_decay
+
+        self._use_warm_lr = True
+        self._warm_steps = 0
+        self.param_groups = self._adam.param_groups
+        self.state = self._adam.state
+
+    def zero_grad(self):
+        self._adam.zero_grad()
+        self._sgd.zero_grad()
+
+    def state_dict(self):
+        return {
+            "adam_state": self._adam.state_dict(),
+            "sgd_state": self._sgd.state_dict(),
+            "warm_lr": self.warm_lr,
+            "steady_lr": self.steady_lr,
+            "grad_threshold": self.grad_threshold,
+            "max_warm_steps": self.max_warm_steps,
+            "steady_momentum": self.steady_momentum,
+            "steady_weight_decay": self.steady_weight_decay,
+            "use_warm_lr": self._use_warm_lr,
+            "warm_steps": self._warm_steps,
+        }
+
+    def load_state_dict(self, state_dict):
+        self._adam.load_state_dict(state_dict["adam_state"])
+        self._sgd.load_state_dict(state_dict["sgd_state"])
+        self.warm_lr = state_dict["warm_lr"]
+        self.steady_lr = state_dict["steady_lr"]
+        self.grad_threshold = state_dict["grad_threshold"]
+        self.max_warm_steps = state_dict["max_warm_steps"]
+        self.steady_momentum = state_dict.get("steady_momentum", self.steady_momentum)
+        self.steady_weight_decay = state_dict.get("steady_weight_decay", self.steady_weight_decay)
+        self._use_warm_lr = state_dict["use_warm_lr"]
+        self._warm_steps = state_dict["warm_steps"]
+        self._set_lr(self.warm_lr if self._use_warm_lr else self.steady_lr)
+        self.param_groups = self._adam.param_groups if self._use_warm_lr else self._sgd.param_groups
+
+    def _set_lr(self, lr):
+        for group in self._adam.param_groups:
+            group["lr"] = lr
+        for group in self._sgd.param_groups:
+            group["lr"] = lr
+
+    def step(self, closure=None, grad_norm: float | None = None):
+        if self._use_warm_lr:
+            trigger = False
+            if grad_norm is not None and grad_norm >= self.grad_threshold:
+                trigger = True
+            elif self._warm_steps >= self.max_warm_steps:
+                trigger = True
+
+            if trigger:
+                self._use_warm_lr = False
+                self._set_lr(self.steady_lr)
+                self.param_groups = self._sgd.param_groups
+                self.state = self._sgd.state
+                logger.info(
+                    "[TwoStageOptimizer] Switching to SGD: grad_norm=%.3f, steps=%d",
+                    grad_norm if grad_norm is not None else float("nan"),
+                    self._warm_steps,
+                )
+
+            self._warm_steps += 1
+
+        if self._use_warm_lr:
+            self._adam.step(closure=closure)
+        else:
+            self._sgd.step(closure=closure)
+
+
+class FCOTSeparable(OT):
+    """
+    Finitely-concave OT solver for separable costs using FiniteSeparableModel.
+    
+    This is a specialized version of FCOT that exploits cost separability:
+        c(x,y) = sum_d c_d(x_d, y_d)
+    
+    Key advantages over standard FCOT:
+      - Exponentially fewer parameters: O(d·|Y_0|) vs O(|Y_0|^d)
+      - Exact discrete transforms (no numerical optimization needed)
+      - Always converges since transforms are solved exactly on grids
+    
+    Parameterization:
+      - Uses FiniteSeparableModel with discretized grids on [-R, R]
+      - Kernel is the 1D version of the cost: kernel(x,y) = c(x,y) for scalars
+      - Mode is "concave" for c-concave potential representation
+    
+    Dual objective:
+        D = E_x[u(x)] + E_y[u^c(y)]
+    
+    Example:
+        >>> from models import FiniteSeparableModel
+        >>> 
+        >>> # For L2^2 cost: c(x,y) = ||x-y||^2 = sum_d (x_d - y_d)^2
+        >>> def kernel_1d(x, y):
+        ...     return -(x - y)**2  # Negative for c-concave
+        >>> 
+        >>> # Create separable model
+        >>> model = FiniteSeparableModel(
+        ...     kernel=kernel_1d,
+        ...     num_dims=2,
+        ...     radius=5.0,
+        ...     y_accuracy=0.1,
+        ...     x_accuracy=0.1,
+        ...     mode="concave"
+        ... )
+        >>> 
+        >>> # Create solver
+        >>> fcot_sep = FCOTSeparable(
+        ...     input_dim=2,
+        ...     model=model,
+        ...     inverse_cx=lambda x, p: x - 0.5 * p  # For L2^2
+        ... )
+        >>> 
+        >>> # Or use factory method
+        >>> fcot_sep = FCOTSeparable.initialize_right_architecture(
+        ...     dim=2,
+        ...     radius=5.0,
+        ...     n_params=100,           # 50 Y-grid points per dimension
+        ...     x_accuracy=0.1,
+        ...     kernel_1d=kernel_1d,
+        ...     inverse_cx=lambda x, p: x - 0.5 * p
+        ... )
+    """
+
+    @staticmethod
+    def initialize_right_architecture(
+        dim: int,
+        radius: float,
+        n_params: int,
+        x_accuracy: float,
+        kernel_1d,                   # 1D kernel function c_d(x, y) for scalars
+        inverse_cx,                  # Inverse gradient for the full cost
+        outer_lr: float = 1e-3,
+        betas=(0.5, 0.9),
+        device: str = "cpu",
+        temp: float = 50.0,
+        epsilon: float = 1e-4,
+        cache_gradients: bool = False,
+        warmup_lr: float | None = None,
+        warmup_grad_threshold: float = 0.5,
+        warmup_max_steps: int = 200,
+        sgd_momentum: float = 0.0,
+        sgd_weight_decay: float = 0.0,
+        temp_min: float | None = None,
+        temp_max: float | None = None,
+        temp_warmup_iters: int | None = None,
+        reactivate_every: int | None = None,
+        reactivate_eps: float = 1e-2,
+        full_refresh_every: int | None = None,
+        **model_kwargs
+    ):
+        """
+        Factory method for creating FCOTSeparable with specified grid resolution.
+        
+        Parameters
+        ----------
+        dim : int
+            Input/output dimension
+        radius : float
+            Domain radius (X, Y ⊆ [-R, R]^d)
+        n_params : int
+            Total number of intercept parameters (must equal dim × |Y_0|)
+        x_accuracy : float
+            Spacing for the X grid (controls X discretization used in transforms)
+        kernel_1d : callable
+            1D kernel c_d(x, y) where x, y are scalars (or 1D tensors)
+        inverse_cx : callable
+            Inverse gradient: (x, p) ↦ y solving ∇_x c(x,y) = p
+        outer_lr : float
+            Learning rate for outer optimization (Adam on intercepts)
+        betas : tuple
+            Beta parameters for Adam optimizer
+        device : str
+            Device to place model on
+        temp : float
+            Temperature for soft max/min in forward pass
+        epsilon : float
+            Boundary margin for clamping inputs to valid domain
+        cache_gradients : bool
+            If True, precompute ∂k/∂x and ∂k/∂y on the grid to speed up hard selections
+        
+        Returns
+        -------
+        FCOTSeparable
+            Configured solver instance
+            
+        Notes
+        -----
+        Parameter count:
+            n_params = dim × |Y_0|
+        
+        Each dimension has n_params / dim intercept parameters (y positions fixed on Y-grid).
+        """
+        if n_params % dim != 0:
+            raise ValueError(f"n_params={n_params} must be divisible by dim={dim}.")
+        ny = n_params // dim
+        if ny < 2:
+            raise ValueError("Need at least two Y-grid points (n_params/dim >= 2).")
+        y_accuracy = (2 * radius) / (ny - 1)
+        actual_params = ny * dim
+        
+        logger.info(f"[FCOT-SEP ARCH] dim={dim}, radius={radius}, ny={ny}")
+        logger.info(f"                x_accuracy={x_accuracy:.4f}")
+        logger.info(f"                y_accuracy={y_accuracy:.4f}")
+        logger.info(f"                actual_params={actual_params}")
+        logger.info(f"                cache_gradients={cache_gradients}")
+        
+        # Build FiniteSeparableModel
+        model_kwargs = dict(model_kwargs)
+        
+        # Backwards compatibility
+        if 'lr' in model_kwargs and outer_lr == 1e-3:
+            outer_lr = model_kwargs.pop('lr')
+            logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
+
+        model = FiniteSeparableModel(
+            kernel=kernel_1d,
+            num_dims=dim,
+            radius=radius,
+            y_accuracy=y_accuracy,
+            x_accuracy=x_accuracy,
+            mode="concave",
+            temp=temp,
+            epsilon=epsilon,
+            cache_gradients=cache_gradients,
+            **model_kwargs,
+        ).to(device)
+        
+        return FCOTSeparable(
+            input_dim=dim,
+            model=model,
+            inverse_cx=inverse_cx,
+            outer_lr=outer_lr,
+            betas=betas,
+            device=device,
+            warmup_lr=warmup_lr,
+            warmup_grad_threshold=warmup_grad_threshold,
+            warmup_max_steps=warmup_max_steps,
+            sgd_momentum=sgd_momentum,
+            sgd_weight_decay=sgd_weight_decay,
+            temp_min=temp_min,
+            temp_max=temp_max,
+            temp_warmup_iters=temp_warmup_iters,
+            reactivate_every=reactivate_every,
+            reactivate_eps=reactivate_eps,
+            full_refresh_every=full_refresh_every,
+        )
+
+    def __init__(
+        self,
+        input_dim: int,
+        model: nn.Module,        # FiniteSeparableModel(mode="concave")
+        inverse_cx,              # (x, p) ↦ y solving ∇_x c(x,y) = p
+        outer_lr: float = 1e-3,
+        lr: float | None = None,  # deprecated alias
+        betas=(0.5, 0.9),
+        device: str = "cpu",
+        warmup_lr: float | None = None,
+        warmup_grad_threshold: float = 0.5,
+        warmup_max_steps: int = 200,
+        sgd_momentum: float = 0.0,
+        sgd_weight_decay: float = 0.0,
+        temp_min: float | None = None,
+        temp_max: float | None = None,
+        temp_warmup_iters: int | None = None,
+        reactivate_every: int | None = None,
+        reactivate_eps: float = 1e-2,
+        full_refresh_every: int | None = None,
+    ):
+        # Handle deprecated lr parameter before delegating to OT.__init__
+        if lr is not None:
+            logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
+            outer_lr = lr
+
+        super().__init__(outer_lr=outer_lr, inner_lr=None)
+        
+        self.input_dim = input_dim
+        self.device = torch.device(device)
+        self.model = model.to(self.device)
+        self.inverse_cx = inverse_cx
+        self.outer_lr = outer_lr
+        self.betas = betas
+        self.inner_steps = 0
+        self.inner_optimizer = None
+        self.inner_tol = None
+        self.inner_lam = None
+        # Flag to skip generic warm-up in base OT (transforms are exact)
+        self._skip_warmup = True
+        self._temp_min = temp_min
+        self._temp_max = temp_max
+        self._temp_warmup_iters = temp_warmup_iters
+        self._temp_step = 0
+        self._grad_activity_eps = 1e-8
+        self._reactivate_every = reactivate_every if reactivate_every and reactivate_every > 0 else None
+        self._reactivate_eps = reactivate_eps
+        self._full_refresh_every = full_refresh_every if full_refresh_every and full_refresh_every > 0 else None
+        self._warned_refresh_unavailable = False
+        self._step_count = 0
+
+        # Outer optimizer for model parameters (intercepts)
+        # Warm-start schedule (TwoStageOptimizer) is no longer used.
+        if warmup_lr is not None:
+            logger.warning(
+                "[DEPRECATION] warmup_* arguments are ignored; using Adam with lr=outer_lr."
+            )
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=outer_lr,
+            betas=betas,
+        )
+        
+        # No inner optimization needed for separable case
+        self.raise_on_inner_divergence = False
+    
+    def _compute_dual_objective(self, X, Y, sample_idx=None):
+        """
+        Compute the Kantorovich dual objective:
+            D = E_x[u(x)] + E_y[u^c(y)]
+        
+        For separable costs, transforms are computed exactly on grids.
+        """
+        # First term: E_x[u(x)]
+        _, u_X = self.model.forward(X, selection_mode="soft")
+        term1 = u_X.mean()
+        
+        # Second term: E_y[u^c(y)]
+        # Note: sample_idx not used for separable model (no warm starts needed)
+        _, u_c_Y, converged = self.model.inf_transform(Y)
+        term2 = u_c_Y.mean()
+        
+        # Dual objective to maximize
+        dual_obj = term1 + term2
+        
+        # Separable model always converges (exact discrete optimization)
+        inner_converged = converged
+        
+        return dual_obj, inner_converged
+
+    def _dual_objective(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
+        """
+        Compute dual objective D = E_x[u(X)] + E_y[u^c(Y)] on the given batch.
+        No inner optimization is required for the separable model.
+        """
+        _, u_vals = self.model.forward(x_batch, selection_mode="soft")
+        u_mean = u_vals.mean()
+
+        _, uc_vals, converged = self.model.inf_transform(y_batch)
+        uc_mean = uc_vals.mean()
+
+        D = u_mean + uc_mean
+        return D, u_mean, uc_mean, converged
+
+    def step(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
+        """
+        Single gradient-ascent step on the dual objective.
+        """
+        self._maybe_update_temperature()
+        self.optimizer.zero_grad()
+        D, u_mean, uc_mean, converged = self._dual_objective(x_batch, y_batch, idx_y, active_inner_steps)
+        #TODO fix ths adhoc scaling
+        (-100 * D).backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+        grad_norm_sq = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                grad_norm_sq += p.grad.norm().item() ** 2
+        grad_norm = grad_norm_sq ** 0.5
+
+        step_kwargs = {}
+        if isinstance(self.optimizer, TwoStageOptimizer):
+            step_kwargs["grad_norm"] = grad_norm
+        self.optimizer.step(**step_kwargs)
+        self._step_count += 1
+        self._maybe_reactivate(x_batch)
+        self._maybe_full_refresh()
+
+        activity = None
+        active_count = None
+        total_count = None
+        intercept_grads = getattr(self.model, "intercepts", None)
+        if intercept_grads is not None and intercept_grads.grad is not None:
+            grad_vals = intercept_grads.grad.detach()
+            active = (grad_vals.abs() > self._grad_activity_eps).sum().item()
+            total = grad_vals.numel()
+            activity = active / total if total > 0 else None
+            active_count = active
+            total_count = total
+
+        return {
+            "dual": float(D.detach().item()),
+            "u_mean": float(u_mean.detach().item()),
+            "uc_mean": float(uc_mean.detach().item()),
+            "inner_converged": converged,
+            "grad_norm": grad_norm,
+            "intercept_active_frac": activity,
+            "intercept_active_count": active_count,
+            "intercept_total": total_count,
+        }
+
+    def _maybe_reactivate(self, x_batch):
+        if self._reactivate_every is None:
+            return
+        if self._step_count % self._reactivate_every != 0:
+            return
+
+        intercepts = getattr(self.model, "intercepts", None)
+        if intercepts is None or intercepts.grad is None:
+            return
+
+        inactive_mask = intercepts.grad.detach().abs() <= self._grad_activity_eps
+        if inactive_mask.sum().item() == 0:
+            return
+
+        x_batch = x_batch.detach().to(device=self.device, dtype=intercepts.dtype)
+        if x_batch.dim() != 2:
+            return
+
+        y_grid = self.model.Y_grid.to(device=self.device, dtype=intercepts.dtype)
+        eps = float(self._reactivate_eps)
+        adjusted = 0
+
+        with torch.no_grad():
+            for dim in range(self.model.num_dims):
+                mask_dim = inactive_mask[:, dim]
+                if not mask_dim.any():
+                    continue
+
+                x_vals = x_batch[:, dim]
+                kernel_vals = self.model.kernel_fn(
+                    x_vals.unsqueeze(-1),
+                    y_grid.unsqueeze(0),
+                )
+
+                column = intercepts[:, dim]
+                scores = kernel_vals - column.unsqueeze(0)
+                best_scores = scores.min(dim=1).values
+                target = (kernel_vals - best_scores.unsqueeze(1) + eps).min(dim=0).values
+                updated_column = torch.where(mask_dim, torch.maximum(column, target), column)
+                if torch.any(updated_column != column):
+                    intercepts[:, dim].copy_(updated_column)
+                adjusted += int(mask_dim.sum().item())
+
+        if adjusted > 0:
+            logger.info(
+                "[FCOT-SEP] Reactivated %d intercepts (eps=%g) at step %d",
+                adjusted,
+                self._reactivate_eps,
+                self._step_count,
+            )
+
+    def _maybe_full_refresh(self):
+        if self._full_refresh_every is None:
+            return
+        if self._step_count % self._full_refresh_every != 0:
+            return
+        
+        # Do full refresh + momentum reset + jitter
+        self._refresh_reset_jitter()
+
+    
+    ###############################################################################
+    # Helpers: reset optimizer momentum + jitter after refresh
+    ###############################################################################
+
+    @torch.no_grad()
+    def _reset_intercept_momentum(self):
+        """
+        Reset momentum / Adam state ONLY for intercept parameters.
+        Works for both Adam and TwoStageOptimizer.
+        """
+        if not hasattr(self, "optimizer") or self.optimizer is None:
+            return
+        
+        intercepts = getattr(self.model, "intercepts", None)
+        if intercepts is None:
+            return
+        
+        # Find optimizer states that correspond to intercepts
+        for group in self.optimizer.param_groups:
+            for p in group["params"]:
+                if p is intercepts:
+                    state = self.optimizer.state.get(p, None)
+                    if state is not None:
+                        state.clear()    # wipes momentum, exp_avg, exp_avg_sq, step
+                    return
+
+
+    @torch.no_grad()
+    def _jitter_intercepts(self, strength: float = None):
+        """
+        Inject tiny Gaussian noise to break ties after b <- b^cc.
+        """
+        intercepts = getattr(self.model, "intercepts", None)
+        if intercepts is None:
+            return
+        
+        # default strength relative to grid resolution
+        if strength is None:
+            strength = 1e-3 * float(self.model.y_accuracy)   # e.g., 2e-5 for your test
+        
+        noise = torch.randn_like(intercepts) * strength
+        intercepts.add_(noise)
+
+
+    @torch.no_grad()
+    def _refresh_reset_jitter(self):
+        """
+        Unified operation: refresh → reset momentum → jitter intercepts.
+        Called inside _maybe_full_refresh().
+        """
+        refresh_fn = getattr(self.model, "refresh_intercepts_via_transform", None)
+        if refresh_fn is None:
+            return
+        
+        changed = refresh_fn()
+        if changed > 0:
+            logger.info(
+                f"[FCOT-SEP] Full refresh updated {changed} intercepts at step {self._step_count}"
+            )
+            self._reset_intercept_momentum()
+            self._jitter_intercepts()
+
+
+    def _maybe_update_temperature(self):
+        if self._temp_min is None or self._temp_max is None:
+            return
+        if self._temp_warmup_iters is None or self._temp_warmup_iters <= 0:
+            self.model.temp = self._temp_max
+            return
+
+        ratio = min(self._temp_step / self._temp_warmup_iters, 1.0)
+        cos_scale = 0.5 * (1 - math.cos(math.pi * ratio))
+        self.model.temp = self._temp_min + (self._temp_max - self._temp_min) * cos_scale
+        self._temp_step += 1
+
+    def save(self, address, iters_done):
+        """
+        Save model checkpoint for caching/resume consistency with other OT subclasses.
+        """
+        torch.save(
+            {
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "iters_done": iters_done,
+                "outer_lr": self.outer_lr,
+                "betas": self.betas,
+            },
+            address,
+        )
+
+    def load(self, address):
+        """
+        Load checkpoint saved via save and return the number of completed iterations.
+        """
+        checkpoint = torch.load(address, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        return checkpoint.get("iters_done", 0)
+    
+    def transport_X_to_Y(self, X):
+        """
+        Transport points from X to Y using the Monge map.
+        
+        The Monge map is the c-gradient of u:
+            T(x) = ∇_x^c u(x) = inverse_cx(x, ∇u(x))
+        
+        For separable models with grid-based representation and kernel_derivative,
+        we use envelope theorem for efficient gradient computation.
+        """
+        X = X.to(self.device)
+        X.requires_grad_(True)
+        
+        # Compute u(x) with gradients
+        # Use "hard" mode for envelope theorem gradients (more efficient)
+        # Use "soft" mode for differentiable selection (smoother but slower)
+        selection_mode = "hard"
+        _, u_X = self.model.forward(X, selection_mode=selection_mode)
+        
+        # Compute ∇u(x) via backprop
+        grad_u = torch.autograd.grad(
+            u_X.sum(),
+            X,
+            create_graph=False
+        )[0]
+        
+        # Apply inverse c-gradient
+        Y_pred = self.inverse_cx(X.detach(), grad_u.detach())
+        
+        return Y_pred
+    
+    def _fit(
+        self,
+        X, Y,
+        iters_done: int = 0,
+        iters: int = 100,
+        inner_steps: int | None = None,  # Not used for separable
+        print_every: int | None = 1,
+        callback=None,
+        convergence_tol: float | None = 1e-4,
+        convergence_patience: int | None = 10,
+        batch_size: int | None = None,
+        eval_every: int = 100,
+        warmup_steps: int = 0,
+        warmup_until_converged: bool = False,
+        log_every: int | None = None,
+        log_level: str | None = None,
+    ):
+        """
+        Fit the model by maximizing the dual objective.
+        
+        Note: inner_steps is ignored for separable model since transforms
+        are computed exactly on grids (no numerical optimization).
+        """
+        if inner_steps is not None and inner_steps != 0:
+            logger.warning(
+                f"[FCOT-SEP] inner_steps={inner_steps} ignored for separable model "
+                "(transforms computed exactly)"
+            )
+        
+        # Call parent's _fit which handles all the logging and optimization loop
+        effective_log_level = "info" if log_level is None else log_level
+        return super()._fit(
+            X, Y,
+            iters_done=iters_done,
+            iters=iters,
+            inner_steps=0,  # Always 0 for separable
+            print_every=print_every,
+            callback=callback,
+            convergence_tol=convergence_tol,
+            convergence_patience=convergence_patience,
+            batch_size=batch_size,
+            eval_every=eval_every,
+            warmup_steps=warmup_steps,
+            warmup_until_converged=warmup_until_converged,
+            log_every=log_every,
+            log_level=effective_log_level,
+        )
+
+
 from typing import Optional
 from torch import nn
 import torch
 from tools.utils import moded_max, moded_min
 from models.inf_convolution import InfConvolution
+from tools.feedback import logger
+
+# =====================================================================
+# FiniteSeparableModel: finitely-convex/concave on product kernels
+# =====================================================================
+
+class FiniteSeparableModel(nn.Module):
+    """
+    Separable finite model for product kernels K(x,y) = sum_d k(x_d, y_d).
+
+    The model discretizes the 1-D Y-domain once (Y = Y_0^d) and keeps one
+    intercept per (y_i, dimension) pair. Forward evaluations split across
+    dimensions. Sup/inf transforms can optionally run a coarse-to-fine search:
+
+        - coarse_x_factor subsamples the X grid by this stride for the coarse pass.
+        - coarse_top_k keeps the top-k coarse candidates per transform call.
+        - coarse_window refines within ±(coarse_window * stride) around each seed.
+
+    If coarse_x_factor is None or <= 1, transforms reduce over the full X grid.
+    """
+
+    def __init__(
+        self,
+        kernel,
+        num_dims: int,
+        radius: float,
+        y_accuracy: float = 1e-2,
+        x_accuracy: float = 1e-2,
+        mode: str = "convex",
+        temp: float = 50.0,
+        epsilon: float = 1e-4,
+        cache_gradients: bool = False,
+        coarse_x_factor: Optional[int] = None,
+        coarse_top_k: int = 1,
+        coarse_window: int = 0,
+        warm_intercept=False,
+        warm_start_source=None,
+        warm_start_target=None,
+        ):
+        super().__init__()
+        assert mode in ("convex", "concave")
+
+        self.kernel_fn = kernel
+        self.num_dims = num_dims
+        self.radius = radius
+        self.y_accuracy = y_accuracy
+        self.x_accuracy = x_accuracy
+        self.mode = mode
+        self.temp = temp
+        self.epsilon = epsilon
+        self.cache_gradients = cache_gradients
+
+        # Discrete grids shared across dimensions
+        ny = int(2 * radius / y_accuracy) + 1
+        nx = int(2 * radius / x_accuracy) + 1
+        Y_grid = torch.linspace(-radius, radius, ny)
+        X_grid = torch.linspace(-radius, radius, nx)
+        kernel_tensor = kernel(X_grid.reshape(-1, 1), Y_grid.reshape(1, -1))  # (nx, ny)
+
+        self.register_buffer("Y_grid", Y_grid)
+        self.register_buffer("X_grid", X_grid)
+        self.register_buffer("kernel_tensor", kernel_tensor)
+        if cache_gradients:
+            dx_tensor, dy_tensor = self._precompute_kernel_derivatives()
+        else:
+            dx_tensor = torch.empty(0)
+            dy_tensor = torch.empty(0)
+        self.register_buffer("kernel_dx", dx_tensor)
+        self.register_buffer("kernel_dy", dy_tensor)
+        intercepts = torch.randn(ny, num_dims)
+        self.intercepts = nn.Parameter(intercepts)
+        # Track last fully refreshed intercepts to make refresh idempotent
+        self._last_refreshed_intercepts: Optional[torch.Tensor] = None
+
+        # Optional coarse-to-fine transform search settings
+        stride = coarse_x_factor if (coarse_x_factor is not None and coarse_x_factor > 1) else None
+        if stride is not None:
+            coarse_idx = torch.arange(0, nx, stride, dtype=torch.long)
+            if coarse_idx[-1] != nx - 1:
+                coarse_idx = torch.cat([coarse_idx, coarse_idx.new_tensor([nx - 1])])
+            coarse_top_k = max(1, coarse_top_k)
+            coarse_window = max(0, coarse_window)
+            window_radius = coarse_window * stride
+            offsets = torch.arange(-window_radius, window_radius + 1, dtype=torch.long)
+        else:
+            coarse_idx = torch.empty(0, dtype=torch.long)
+            offsets = torch.empty(0, dtype=torch.long)
+            coarse_top_k = 0
+            coarse_window = 0
+        self.register_buffer("coarse_idx", coarse_idx)
+        self.register_buffer("coarse_offsets", offsets)
+        self.coarse_stride = stride if stride is not None else 1
+        self.coarse_top_k = coarse_top_k
+        self.coarse_window = coarse_window
+        self.use_coarse_search = coarse_idx.numel() > 0
+        if warm_intercept:
+            assert warm_start_source is not None and warm_start_target is not None, "Must provide warm_start_source and warm_start_target when warm_intercept is True."
+            self.warm_start_intercept(warm_start_source, warm_start_target)
+            
+    
+    def warm_start_intercept(self, source_samples, target_samples):
+        """
+        Warm-start intercepts for the separable model using **1D OT potentials**
+        computed from the marginals only.
+        """
+        logger.info("[FiniteSeparableModel] Warm-starting intercepts using 1D OT potentials.")
+        if source_samples.dim() != 2:
+            raise ValueError("source_samples must be 2D (n, D).")
+        if target_samples.shape != source_samples.shape:
+            raise ValueError("source_samples and target_samples must match in shape.")
+
+        n, D = source_samples.shape
+        if D != self.num_dims:
+            raise ValueError(f"Model expects {self.num_dims} dims, got {D}.")
+        if n < 2:
+            return False
+
+        X_grid = self.X_grid
+        Y_grid = self.Y_grid
+        K = self.kernel_tensor
+        nx, ny = K.shape
+        dx = X_grid[1] - X_grid[0]
+
+        # ------------------------------------------
+        # Helper: empirical quantile
+        # ------------------------------------------
+        def empirical_quantile(sorted_vals, q):
+            m = sorted_vals.numel()
+            pos = q * (m - 1)
+            lo = pos.floor().long().clamp(0, m - 1)
+            hi = pos.ceil().long().clamp(0, m - 1)
+            if (lo == hi).item():
+                return sorted_vals[lo]
+            w = pos - lo.float()
+            return sorted_vals[lo] * (1 - w) + sorted_vals[hi] * w
+
+        # ------------------------------------------
+        # Helper: dk/dx — MUST RUN WITH GRAD ENABLED
+        # ------------------------------------------
+        def dkdx(x_scalar, y_scalar):
+            with torch.enable_grad():
+                x_req = x_scalar.clone().detach().requires_grad_(True)
+                val = self.kernel_fn(
+                    x_req.view(1,1),
+                    y_scalar.view(1,1)
+                ).squeeze()
+                grad = torch.autograd.grad(val, x_req, retain_graph=False)[0]
+            return grad.detach()
+
+        # ------------------------------------------
+        # Main loop over dimensions
+        # ------------------------------------------
+        for d in range(D):
+
+            # 1. sort marginals
+            Xd = source_samples[:, d]
+            Yd = target_samples[:, d]
+            X_sorted, _ = torch.sort(Xd)
+            Y_sorted, _ = torch.sort(Yd)
+
+            # 2. CDF of X on the grid
+            ranks = torch.searchsorted(X_sorted, X_grid)
+            q = ranks.clamp(0, n - 1).float() / (n - 1 + 1e-9)
+
+            # 3. transport map T_d
+            T_vals = torch.stack([empirical_quantile(Y_sorted, qi) for qi in q])
+
+            # 4. u'(x)
+            u_prime = torch.stack([dkdx(xi, yi) for xi, yi in zip(X_grid, T_vals)])
+
+            # 5. integrate to u(x)
+            u_grid = torch.cumsum(u_prime * dx, dim=0)
+            u_grid -= u_grid.min()
+
+            # 6. convert to intercepts
+            diff = K - u_grid.view(-1, 1)
+            if self.mode == "concave":
+                b_vals = diff.max(dim=0).values
+            else:
+                b_vals = diff.min(dim=0).values
+
+            # write parameters WITHOUT grad
+            with torch.no_grad():
+                self.intercepts[:, d].copy_(b_vals)
+        return True
+
+    def refresh_intercepts_via_transform(self) -> int:
+        """Recompute every intercept column via the exact discrete sup/inf transforms."""
+        K = self.kernel_tensor.to(device=self.intercepts.device, dtype=self.intercepts.dtype)
+        # If intercepts already match the last refreshed state, do nothing (idempotent).
+        current = self.intercepts.detach()
+        if self._last_refreshed_intercepts is not None and torch.equal(
+            current, self._last_refreshed_intercepts
+        ):
+            return 0
+
+        changed = 0
+        with torch.no_grad():
+            for dim in range(self.num_dims):
+                column = self.intercepts[:, dim]
+                scores = K - column.unsqueeze(0)
+                if self.mode == "concave":
+                    # First inf-transform in x, then sup-transform in x
+                    u_grid = scores.min(dim=1).values
+                    diff = K - u_grid.unsqueeze(1)
+                    refreshed = diff.max(dim=0).values
+                else:
+                    # First sup-transform in x, then inf-transform in x
+                    u_grid = scores.max(dim=1).values
+                    diff = K - u_grid.unsqueeze(1)
+                    refreshed = diff.min(dim=0).values
+
+                changed += (refreshed - column).abs().gt(1e-12).sum().item()
+                column.copy_(refreshed)
+
+            # Cache refreshed intercepts snapshot for idempotence checks
+            self._last_refreshed_intercepts = self.intercepts.detach().clone()
+
+        return changed
+
+
+    def project(self, T: torch.Tensor) -> torch.Tensor:
+        """Clamp tensor entries to [-R+ε, R-ε]."""
+        return torch.clamp(T, -self.radius + self.epsilon, self.radius - self.epsilon)
+
+    def _kernel_grad_wrt_x(self, x_scalar: torch.Tensor, y_scalar: torch.Tensor) -> torch.Tensor:
+        """Compute ∂k/∂x at (x_scalar, y_scalar) using the continuous kernel."""
+        with torch.enable_grad():
+            x_temp = x_scalar.detach().clone().requires_grad_(True)
+            y_temp = y_scalar.detach().clone().reshape(1, 1)
+            x_temp_view = x_temp.reshape(1, 1)
+            k_val = self.kernel_fn(x_temp_view, y_temp).squeeze()
+            dk_dx = torch.autograd.grad(k_val, x_temp, retain_graph=False, create_graph=False)[0]
+        return dk_dx.detach()
+
+    def _kernel_grad_wrt_y(self, x_scalar: torch.Tensor, y_scalar: torch.Tensor) -> torch.Tensor:
+        """Compute ∂k/∂y at (x_scalar, y_scalar) using the continuous kernel."""
+        with torch.enable_grad():
+            y_temp = y_scalar.detach().clone().requires_grad_(True)
+            x_temp = x_scalar.detach().clone().reshape(1, 1)
+            y_temp_view = y_temp.reshape(1, 1)
+            k_val = self.kernel_fn(x_temp, y_temp_view).squeeze()
+            dk_dy = torch.autograd.grad(k_val, y_temp, retain_graph=False, create_graph=False)[0]
+        return dk_dy.detach()
+
+    def _precompute_kernel_derivatives(self):
+        """
+        Precompute ∂k/∂x and ∂k/∂y on the (X_grid, Y_grid) lattice
+        for use in cached straight-through gradients.
+        """
+        device = self.X_grid.device
+        dtype = self.X_grid.dtype
+
+        with torch.enable_grad():
+            dx_list = []
+            for y in self.Y_grid:
+                x_vals = self.X_grid.clone().detach().requires_grad_(True)
+                y_tensor = y.clone().detach().to(device=device, dtype=dtype).unsqueeze(0).unsqueeze(0)
+                vals = self.kernel_fn(x_vals.unsqueeze(-1), y_tensor).squeeze()
+                grad_x = torch.autograd.grad(
+                    vals, x_vals, grad_outputs=torch.ones_like(vals), retain_graph=False, create_graph=False
+                )[0]
+                dx_list.append(grad_x.detach())
+            kernel_dx = torch.stack(dx_list, dim=1)
+
+            dy_list = []
+            for x in self.X_grid:
+                y_vals = self.Y_grid.clone().detach().requires_grad_(True)
+                x_tensor = x.clone().detach().to(device=device, dtype=dtype).unsqueeze(0).unsqueeze(0)
+                vals = self.kernel_fn(x_tensor, y_vals.unsqueeze(0)).squeeze()
+                grad_y = torch.autograd.grad(
+                    vals, y_vals, grad_outputs=torch.ones_like(vals), retain_graph=False, create_graph=False
+                )[0]
+                dy_list.append(grad_y.detach())
+            kernel_dy = torch.stack(dy_list, dim=0)
+
+        return kernel_dx, kernel_dy
+
+    def _cached_dx(self, x_vals: torch.Tensor, y_vals: torch.Tensor) -> torch.Tensor:
+        """Interpolate cached ∂k/∂x for each (x, y) pair."""
+        if self.kernel_dx.numel() == 0:
+            raise RuntimeError("Cached gradients requested but kernel_dx not precomputed.")
+        nx = self.X_grid.numel()
+        ny = self.Y_grid.numel()
+
+        x_pos = (x_vals + self.radius) / self.x_accuracy
+        x_low = torch.floor(x_pos).long().clamp(0, nx - 1)
+        x_high = torch.clamp(x_low + 1, 0, nx - 1)
+        weight = (x_pos - x_low.float()).clamp(0.0, 1.0)
+
+        y_idx = ((y_vals + self.radius) / self.y_accuracy).round().long().clamp(0, ny - 1)
+
+        grad_low = self.kernel_dx[x_low, y_idx]
+        grad_high = self.kernel_dx[x_high, y_idx]
+        return grad_low + (grad_high - grad_low) * weight
+
+    def _cached_dy(self, x_idx: torch.Tensor, y_vals: torch.Tensor) -> torch.Tensor:
+        """Interpolate cached ∂k/∂y for fixed x-grid indices."""
+        if self.kernel_dy.numel() == 0:
+            raise RuntimeError("Cached gradients requested but kernel_dy not precomputed.")
+        ny = self.Y_grid.numel()
+
+        y_pos = (y_vals + self.radius) / self.y_accuracy
+        y_low = torch.floor(y_pos).long().clamp(0, ny - 1)
+        y_high = torch.clamp(y_low + 1, 0, ny - 1)
+        weight = (y_pos - y_low.float()).clamp(0.0, 1.0)
+
+        grad_low = self.kernel_dy[x_idx, y_low]
+        grad_high = self.kernel_dy[x_idx, y_high]
+        return grad_low + (grad_high - grad_low) * weight
+
+    def _per_dim_forward(self, X: torch.Tensor, along: int = 0, selection_mode: str = "soft"):
+        """
+        Compute per-dimension contribution:
+            convex → max_i k(x_d, y_i) - b_i^d
+            concave → min_i k(x_d, y_i) - b_i^d
+        """
+        x_vals = X[:, along]
+        x_vals_clamped = self.project(x_vals)
+
+        if selection_mode == "hard":
+            # Snap to grid for fast lookup
+            x_indices = self.get_indices_for_x(x_vals_clamped.detach()).long()
+            kernel_scores = self.kernel_tensor[x_indices, :]
+        else:
+            # Soft/STE modes need smooth dependence on x
+            kernel_scores = self.kernel_fn(
+                x_vals_clamped.unsqueeze(-1),
+                self.Y_grid.unsqueeze(0),
+            )
+
+        b = self.intercepts[:, along].unsqueeze(0)
+        scores = kernel_scores - b
+        Y_candidates = self.Y_grid.view(1, -1, 1)
+
+        if self.mode == "convex":
+            choice, f_x, _ = moded_max(scores, Y_candidates, dim=1, temp=self.temp, mode=selection_mode)
+        else:
+            choice, f_x, _ = moded_min(scores, Y_candidates, dim=1, temp=self.temp, mode=selection_mode)
+
+        choice = choice.squeeze(-1)
+
+        if selection_mode == "hard" and x_vals.requires_grad:
+            # Straight-through gradient: reuse cached derivatives if available, otherwise compute on the fly.
+            if self.cache_gradients and self.kernel_dx.numel() > 0:
+                approx_grads = self._cached_dx(x_vals_clamped, choice.detach())
+            else:
+                approx_grads = []
+                for xs, ys in zip(x_vals_clamped, choice.detach()):
+                    approx_grads.append(self._kernel_grad_wrt_x(xs, ys))
+                approx_grads = torch.stack(approx_grads, dim=0)
+            f_x = f_x + approx_grads * (x_vals_clamped - x_vals_clamped.detach())
+
+        return choice, f_x
+
+    def forward(self, X: torch.Tensor, selection_mode: str = "soft"):
+        args = []
+        values = []
+        for dim in range(self.num_dims):
+            arg, val = self._per_dim_forward(X, along=dim, selection_mode=selection_mode)
+            args.append(arg)
+            values.append(val)
+
+        f_x = torch.stack(values, dim=1).sum(dim=1)
+        choice = torch.stack(args, dim=1)
+        return choice, f_x
+
+    def sup_transform(self, Z):
+        return self._transform_core(Z, maximize=True)
+
+    def inf_transform(self, Z):
+        return self._transform_core(Z, maximize=False)
+
+    def _warm_start_intercepts(
+        self,
+        source_samples: Optional[torch.Tensor],
+        target_samples: Optional[torch.Tensor],
+    ) -> bool:
+        """
+        Initialize intercept parameters from a linear regression between source and target samples.
+
+        Args:
+            source_samples: Tensor of shape (n, num_dims) with source coordinates (X).
+            target_samples: Tensor of shape (n, num_dims) with target coordinates (Y).
+
+        Returns:
+            bool indicating whether warm-starting was performed.
+        """
+        if source_samples is None or target_samples is None:
+            return False
+
+        if not torch.is_tensor(source_samples):
+            source_samples = torch.tensor(source_samples, dtype=self.X_grid.dtype)
+        if not torch.is_tensor(target_samples):
+            target_samples = torch.tensor(target_samples, dtype=self.X_grid.dtype)
+
+        if source_samples.shape != target_samples.shape:
+            raise ValueError(
+                "warm_start_source and warm_start_target must share the same shape."
+            )
+        if source_samples.dim() != 2 or source_samples.shape[1] != self.num_dims:
+            raise ValueError(
+                f"Warm-start samples must have shape (n, {self.num_dims})."
+            )
+
+        device = self.intercepts.device
+        dtype = self.intercepts.dtype
+        X_samples = source_samples.to(device=device, dtype=dtype)
+        Y_samples = target_samples.to(device=device, dtype=dtype)
+
+        n_samples = X_samples.shape[0]
+        if n_samples < 2:
+            logger.warning(
+                "[FiniteSeparableModel] Not enough samples (%d) to warm-start intercepts.",
+                n_samples,
+            )
+            return False
+
+        ones = torch.ones(n_samples, 1, device=device, dtype=dtype)
+        x_grid = self.X_grid.to(device=device, dtype=dtype)
+        kernel_tensor = self.kernel_tensor.to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            for dim in range(self.num_dims):
+                design = torch.cat([X_samples[:, dim : dim + 1], ones], dim=1)
+                # Solve least-squares for slope/intercept mapping x -> y
+                lstsq_result = torch.linalg.lstsq(design, Y_samples[:, dim])
+                slope, bias = lstsq_result.solution
+
+                u_guess = slope * x_grid + bias  # linear approximation of u(x)
+                diff = kernel_tensor - u_guess.view(-1, 1)
+                if self.mode == "concave":
+                    intercept_vals = diff.max(dim=0).values
+                else:
+                    intercept_vals = diff.min(dim=0).values
+                self.intercepts[:, dim].copy_(intercept_vals)
+
+        logger.info(
+            "[FiniteSeparableModel] Warm-started intercepts using %d samples.", n_samples
+        )
+        return True
+
+    def _transform_core(self, Z: torch.Tensor, maximize: bool = True):
+        num_samples, num_dims = Z.shape
+        device = Z.device
+        dtype = Z.dtype
+        X_points = []
+        total_values = torch.zeros(num_samples, device=device, dtype=dtype)
+
+        for d in range(num_dims):
+            x_opt_d, value_d = self._per_dimension_transform_batch(Z[:, d], along=d, maximize=maximize)
+            X_points.append(x_opt_d)
+            total_values = total_values + value_d
+
+        X_opt = torch.stack(X_points, dim=1)
+        return X_opt.detach(), total_values, True
+
+    def _per_dimension_transform_batch(self, z_vals: torch.Tensor, along: int, maximize: bool):
+        """
+        Vectorized per-dimension transform for an entire batch of z values.
+        """
+        device = z_vals.device
+        dtype = z_vals.dtype
+        z_clamped = self.project(z_vals)
+        z_idx = self.get_indices_for_y(z_clamped.detach()).long()
+
+        kernel_tensor = self.kernel_tensor
+        kernel_vals = kernel_tensor[:, z_idx]  # (nx, batch)
+
+        rows = kernel_tensor
+        b = self.intercepts[:, along]
+        scores = rows - b.unsqueeze(0)
+        if self.mode == "convex":
+            f_subset = scores.max(dim=1).values
+        else:
+            f_subset = scores.min(dim=1).values
+
+        objective_all = kernel_vals - f_subset.unsqueeze(1)
+        nx, batch = objective_all.shape
+
+        if not self.use_coarse_search or self.coarse_idx.numel() == 0:
+            if maximize:
+                best_pos = objective_all.argmax(dim=0)
+            else:
+                best_pos = objective_all.argmin(dim=0)
+            best_values = objective_all[best_pos, torch.arange(batch, device=device)]
+            best_idx = best_pos
+        else:
+            coarse_idx = self.coarse_idx
+            coarse_obj = objective_all.index_select(0, coarse_idx)
+            k = max(1, min(self.coarse_top_k, coarse_obj.size(0)))
+            if maximize:
+                _, top_pos = torch.topk(coarse_obj, k=k, dim=0, largest=True)
+            else:
+                _, top_pos = torch.topk(-coarse_obj, k=k, dim=0, largest=True)
+            seed_idx = coarse_idx[top_pos]
+
+            if self.coarse_offsets.numel() == 0:
+                refine_idx = seed_idx.view(-1, batch)
+            else:
+                offsets = self.coarse_offsets.view(1, 1, -1)
+                refine_idx = seed_idx.unsqueeze(-1) + offsets
+                refine_idx = refine_idx.view(-1, batch)
+            refine_idx = refine_idx.clamp(0, nx - 1)
+
+            candidate_obj = objective_all.gather(0, refine_idx)
+            if maximize:
+                best_rows = candidate_obj.argmax(dim=0)
+            else:
+                best_rows = candidate_obj.argmin(dim=0)
+            best_values = candidate_obj[best_rows, torch.arange(batch, device=device)]
+            best_idx = refine_idx[best_rows, torch.arange(batch, device=device)]
+
+        x_opt = self.X_grid[best_idx].to(device=device, dtype=dtype)
+        values = best_values
+
+        if z_vals.requires_grad:
+            if self.cache_gradients and self.kernel_dy.numel() > 0:
+                approx_grad = self._cached_dy(best_idx, z_clamped)
+            else:
+                grads = []
+                for x_opt_val, z_val in zip(x_opt, z_clamped):
+                    grads.append(self._kernel_grad_wrt_y(x_opt_val, z_val))
+                approx_grad = torch.stack(grads, dim=0)
+            values = values + approx_grad * (z_clamped - z_clamped.detach())
+
+        return x_opt, values.to(device=device, dtype=dtype)
+
+    def _objective_on_indices(self, indices, kernel_vals, along):
+        """
+        Evaluate kernel(x_j, z) - f^d(x_j) for a subset of X-grid indices.
+
+        Args:
+            indices: 1-D LongTensor with rows of the X grid to evaluate.
+            kernel_vals: precomputed k(x_j, z) for all j.
+            along: dimension index.
+        """
+        rows = self.kernel_tensor.index_select(0, indices)  # (subset, ny)
+        b = self.intercepts[:, along]                       # (ny,)
+        scores = rows - b.unsqueeze(0)
+        if self.mode == "convex":
+            f_subset = scores.max(dim=1).values
+        else:
+            f_subset = scores.min(dim=1).values
+        return kernel_vals[indices] - f_subset
+
+    def _build_refine_indices(self, seeds):
+        """
+        Expand coarse seed indices by the configured window.
+        """
+        if self.coarse_offsets.numel() == 0:
+            return seeds.unique(sorted=True)
+        neighbors = seeds.unsqueeze(1) + self.coarse_offsets.unsqueeze(0)
+        neighbors = neighbors.reshape(-1)
+        neighbors = neighbors.clamp(0, self.X_grid.numel() - 1)
+        return neighbors.unique(sorted=True)
+
+    def _coarse_transform(self, kernel_vals, along, maximize):
+        """
+        Run coarse-to-fine search for transforms:
+            1. Evaluate objective on subsampled coarse grid.
+            2. Select top-k coarse seeds.
+            3. Refine by evaluating all fine-grid points in the window.
+        """
+        coarse_idx = self.coarse_idx
+        coarse_obj = self._objective_on_indices(coarse_idx, kernel_vals, along)
+        k = min(self.coarse_top_k, coarse_idx.numel())
+        if maximize:
+            _, top_pos = torch.topk(coarse_obj, k=k, largest=True)
+        else:
+            _, top_pos = torch.topk(-coarse_obj, k=k, largest=True)
+        seed_idx = coarse_idx[top_pos]
+        refine_idx = self._build_refine_indices(seed_idx)
+        obj_subset = self._objective_on_indices(refine_idx, kernel_vals, along)
+        if maximize:
+            best_pos = obj_subset.argmax()
+        else:
+            best_pos = obj_subset.argmin()
+        best_idx = refine_idx[best_pos]
+        value = obj_subset[best_pos]
+        return best_idx, value
+
+    def get_indices_for_x(self, X):
+        idx = ((X + self.radius) / self.x_accuracy).round().long()
+        nx = self.X_grid.numel()
+        return idx.clamp(0, nx - 1)
+
+    def get_indices_for_y(self, Y):
+        idx = ((Y + self.radius) / self.y_accuracy).round().long()
+        ny = self.Y_grid.numel()
+        return idx.clamp(0, ny - 1)
+
+
 # =====================================================================
 # FiniteModel: unified finitely-convex / finitely-concave representation
 # =====================================================================

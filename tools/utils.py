@@ -508,4 +508,8 @@ def inverse_grad_L22(X, Z):
     #computes the inverse gradient of the [||xi-yi||_2^2] euclidean squared cost between two sets of points
     return X - Z
 
-
+def project_to_box(x, R):
+    """
+    Projects x onto the box [-R, R] elementwise.
+    """
+    return x.clamp(-R, R)

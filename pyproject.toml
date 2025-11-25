@@ -8,6 +8,11 @@ python_functions = ["test_*"]
 
 # Test directories
 testpaths = ["tests"]
+pythonpath = ["."]
+
+# Exclude manual tests from default test runs
+# Run these explicitly: pytest tests/manual/ -v
+norecursedirs = ["tests/manual"]
 
 # Output options
 addopts = [
