@@ -74,7 +74,35 @@ class OT:
         # returns address associated with the model specification and data
         h = self.get_hash(X, Y)
         classname = self.__class__.__name__
-        filename = f"{classname}_dim{self.input_dim}_{h}.pt"
+
+        # Try to extract a human-readable kernel name (if available)
+        kernel_name = None
+
+        # 1) Direct attributes on the solver
+        for attr in ("kernel", "kernel_fn", "cost", "cost_fn"):
+            fn = getattr(self, attr, None)
+            if callable(fn):
+                kernel_name = getattr(fn, "__name__", fn.__class__.__name__)
+                break
+
+        # 2) Attributes on the underlying model (e.g., FiniteModel / FiniteSeparableModel)
+        if kernel_name is None:
+            model = getattr(self, "model", None)
+            if model is not None:
+                for attr in ("kernel_fn", "kernel", "cost_fn"):
+                    fn = getattr(model, attr, None)
+                    if callable(fn):
+                        kernel_name = getattr(fn, "__name__", fn.__class__.__name__)
+                        break
+
+        extra = ""
+        if kernel_name is not None:
+            # Sanitize for filenames
+            safe = kernel_name.replace("<", "").replace(">", "")
+            safe = safe.replace(" ", "_").replace(".", "-")
+            extra = f"_kernel-{safe}"
+
+        filename = f"{classname}_dim{self.input_dim}{extra}_{h}.pt"
         return os.path.join(dir, filename)
 
     def save(self, address, iters_done):

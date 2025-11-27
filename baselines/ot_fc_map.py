@@ -22,7 +22,7 @@ class FCOT(OT):
       - Maximizes D with Adam on the parameters of u.
       - Uses FiniteModel.inf_transform with sample_idx for per-sample warm starts.
       - Supports stochastic minibatching in _fit.
-      - Recovers the Monge map via the c-gradient of u with inverse_cx.
+      - Recovers the Monge map via the c-gradient of u with inverse_kx.
       - Issues warnings when inner optimization (conjugate computation) fails to converge.
     
     Example:
@@ -41,7 +41,7 @@ class FCOT(OT):
         >>> fcot = FCOT(
         ...     input_dim=2,
         ...     model=model,
-        ...     inverse_cx=inverse_grad_L22,
+        ...     inverse_kx=inverse_grad_L22,
         ...     lr=1e-3
         ... )
         >>> 
@@ -50,7 +50,7 @@ class FCOT(OT):
         ...     dim=2,
         ...     n_params_target=1000,
         ...     cost=L22,
-        ...     inverse_cx=inverse_grad_L22
+        ...     inverse_kx=inverse_grad_L22
         ... )
         >>> 
         >>> # Fit to data
@@ -69,7 +69,7 @@ class FCOT(OT):
         dim: int,
         n_params_target: int,
         cost,                        # Cost function c(x,y)
-        inverse_cx,                  # Inverse gradient: (x,p) ↦ y solving ∇_x c(x,y) = p
+        inverse_kx,                  # Inverse gradient: (x,p) ↦ y solving ∇_x k(x,y) = p
         outer_lr: float = 1e-3,
         betas=(0.5, 0.9),
         device: str = "cpu",
@@ -98,7 +98,7 @@ class FCOT(OT):
             Target number of learnable parameters
         cost : callable
             Cost function c(X, Y) where X, Y have shape (batch, dim)
-        inverse_cx : callable
+        inverse_kx : callable
             Maps (X, grad_c) → Y solving ∇_x c(X,Y) = grad_c
         outer_lr : float, default=1e-3
             Learning rate for outer optimizer (Adam on model parameters)
@@ -166,7 +166,7 @@ class FCOT(OT):
         return FCOT(
             input_dim=dim,
             model=model,
-            inverse_cx=inverse_cx,
+            inverse_kx=inverse_kx,
             outer_lr=outer_lr,
             betas=betas,
             device=device,
@@ -184,7 +184,7 @@ class FCOT(OT):
         self,
         input_dim: int,
         model: nn.Module,        # FiniteModel(mode="concave", kernel = c)
-        inverse_cx,              # (x,p) ↦ y solving ∇_x c(x,y) = p
+        inverse_kx,              # (x,p) ↦ y solving ∇_x k(x,y) = p
         outer_lr: float = 1e-3,
         lr: float | None = None,  # deprecated alias for outer_lr
         betas=(0.5, 0.9),
@@ -209,7 +209,7 @@ class FCOT(OT):
         self.model = model.to(device)
         self.device = torch.device(device)
 
-        self.inverse_cx = inverse_cx
+        self.inverse_kx = inverse_kx
 
         # Outer optimizer (on f parameters)
         self.outer_lr = outer_lr
@@ -337,7 +337,7 @@ class FCOT(OT):
 
 
     # ----------------------------------------------------------------------
-    # Monge map T(X): via ∇u and inverse_cx
+    # Monge map T(X): via ∇u and inverse_kx
     # ----------------------------------------------------------------------
     def transport_X_to_Y(self, X):
         """
@@ -350,7 +350,7 @@ class FCOT(OT):
             ∇_x c(x, T(x)) = ∇u(x).
 
         So:
-            T(x) = inverse_cx(x, ∇u(x)).
+            T(x) = inverse_kx(x, ∇u(x)).
         """
         X = X.to(self.device).requires_grad_(True)
 
@@ -358,7 +358,7 @@ class FCOT(OT):
         grad_u = torch.autograd.grad(u_vals.sum(), X)[0]
 
         with torch.no_grad():
-            Y = self.inverse_cx(X, grad_u)
+            Y = self.inverse_kx(X, grad_u)
 
         return Y
 

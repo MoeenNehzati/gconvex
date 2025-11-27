@@ -57,7 +57,7 @@ if __name__ == '__main__':
     fcot = FCOT.initialize_right_architecture(d,
                                               nparams,
                                               cost=L22,
-                                              inverse_cx=inverse_grad_L22,
+                                              inverse_kx=inverse_grad_L22,
                                               lr=lr,
                                               inner_optimizer=inner_optimizer,
                                               is_cost_metric=False)

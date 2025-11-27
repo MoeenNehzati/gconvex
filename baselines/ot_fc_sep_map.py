@@ -165,7 +165,7 @@ class FCOTSeparable(OT):
         >>> fcot_sep = FCOTSeparable(
         ...     input_dim=2,
         ...     model=model,
-        ...     inverse_cx=lambda x, p: x - 0.5 * p  # For L2^2
+        ...     inverse_kx=lambda x, p: x - 0.5 * p  # For L2^2
         ... )
         >>> 
         >>> # Or use factory method
@@ -175,7 +175,7 @@ class FCOTSeparable(OT):
         ...     n_params=100,           # 50 Y-grid points per dimension
         ...     x_accuracy=0.1,
         ...     kernel_1d=kernel_1d,
-        ...     inverse_cx=lambda x, p: x - 0.5 * p
+        ...     inverse_kx=lambda x, p: x - 0.5 * p
         ... )
     """
 
@@ -186,7 +186,7 @@ class FCOTSeparable(OT):
         n_params: int,
         x_accuracy: float,
         kernel_1d,                   # 1D kernel function c_d(x, y) for scalars
-        inverse_cx,                  # Inverse gradient for the full cost
+        inverse_kx,                  # Inverse gradient for the full cost
         outer_lr: float = 1e-3,
         betas=(0.5, 0.9),
         device: str = "cpu",
@@ -221,7 +221,7 @@ class FCOTSeparable(OT):
             Spacing for the X grid (controls X discretization used in transforms)
         kernel_1d : callable
             1D kernel c_d(x, y) where x, y are scalars (or 1D tensors)
-        inverse_cx : callable
+        inverse_kx : callable
             Inverse gradient: (x, p) ↦ y solving ∇_x c(x,y) = p
         outer_lr : float
             Learning rate for outer optimization (Adam on intercepts)
@@ -286,7 +286,7 @@ class FCOTSeparable(OT):
         return FCOTSeparable(
             input_dim=dim,
             model=model,
-            inverse_cx=inverse_cx,
+            inverse_kx=inverse_kx,
             outer_lr=outer_lr,
             betas=betas,
             device=device,
@@ -307,7 +307,7 @@ class FCOTSeparable(OT):
         self,
         input_dim: int,
         model: nn.Module,        # FiniteSeparableModel(mode="concave")
-        inverse_cx,              # (x, p) ↦ y solving ∇_x c(x,y) = p
+        inverse_kx,              # (x, p) ↦ y solving ∇_x k(x,y) = p
         outer_lr: float = 1e-3,
         lr: float | None = None,  # deprecated alias
         betas=(0.5, 0.9),
@@ -334,7 +334,7 @@ class FCOTSeparable(OT):
         self.input_dim = input_dim
         self.device = torch.device(device)
         self.model = model.to(self.device)
-        self.inverse_cx = inverse_cx
+        self.inverse_kx = inverse_kx
         self.outer_lr = outer_lr
         self.betas = betas
         self.inner_steps = 0
@@ -431,9 +431,15 @@ class FCOTSeparable(OT):
         activity = None
         active_count = None
         total_count = None
-        intercept_grads = getattr(self.model, "intercepts", None)
-        if intercept_grads is not None and intercept_grads.grad is not None:
-            grad_vals = intercept_grads.grad.detach()
+        # Gradient activity based on underlying intercept parameters
+        intercepts_param = getattr(self.model, "intercepts_param", None)
+        theta_grad = None
+        if intercepts_param is not None and hasattr(intercepts_param, "theta"):
+            theta_grad = intercepts_param.theta.grad
+        if theta_grad is not None:
+            # Map parameter gradient to full intercept shape by padding first row with zeros
+            grad_vals = torch.zeros_like(self.model.intercepts, device=theta_grad.device, dtype=theta_grad.dtype)
+            grad_vals[1:, :] = theta_grad.detach()
             active = (grad_vals.abs() > self._grad_activity_eps).sum().item()
             total = grad_vals.numel()
             activity = active / total if total > 0 else None
@@ -457,11 +463,19 @@ class FCOTSeparable(OT):
         if self._step_count % self._reactivate_every != 0:
             return
 
-        intercepts = getattr(self.model, "intercepts", None)
-        if intercepts is None or intercepts.grad is None:
+        intercepts_param = getattr(self.model, "intercepts_param", None)
+        theta_grad = None
+        if intercepts_param is not None and hasattr(intercepts_param, "theta"):
+            theta_grad = intercepts_param.theta.grad
+        if theta_grad is None:
             return
 
-        inactive_mask = intercepts.grad.detach().abs() <= self._grad_activity_eps
+        # Build full gradient matrix (pad first row with zeros to match intercept shape)
+        intercepts = self.model.intercepts
+        full_grad = torch.zeros_like(intercepts, device=theta_grad.device, dtype=theta_grad.dtype)
+        full_grad[1:, :] = theta_grad.detach()
+
+        inactive_mask = full_grad.abs() <= self._grad_activity_eps
         if inactive_mask.sum().item() == 0:
             return
 
@@ -491,7 +505,11 @@ class FCOTSeparable(OT):
                 target = (kernel_vals - best_scores.unsqueeze(1) + eps).min(dim=0).values
                 updated_column = torch.where(mask_dim, torch.maximum(column, target), column)
                 if torch.any(updated_column != column):
-                    intercepts[:, dim].copy_(updated_column)
+                    # Write back through parameterization if available
+                    if intercepts_param is not None and hasattr(intercepts_param, "set_column_from_raw_"):
+                        intercepts_param.set_column_from_raw_(dim, updated_column)
+                    else:
+                        intercepts[:, dim].copy_(updated_column)
                 adjusted += int(mask_dim.sum().item())
 
         if adjusted > 0:
@@ -525,14 +543,19 @@ class FCOTSeparable(OT):
         if not hasattr(self, "optimizer") or self.optimizer is None:
             return
         
-        intercepts = getattr(self.model, "intercepts", None)
-        if intercepts is None:
+        intercepts_param = getattr(self.model, "intercepts_param", None)
+        target_param = None
+        if intercepts_param is not None and hasattr(intercepts_param, "theta"):
+            target_param = intercepts_param.theta
+        else:
+            target_param = getattr(self.model, "intercepts", None)
+        if target_param is None:
             return
         
-        # Find optimizer states that correspond to intercepts
+        # Find optimizer states that correspond to the intercept parameter
         for group in self.optimizer.param_groups:
             for p in group["params"]:
-                if p is intercepts:
+                if p is target_param:
                     state = self.optimizer.state.get(p, None)
                     if state is not None:
                         state.clear()    # wipes momentum, exp_avg, exp_avg_sq, step
@@ -544,16 +567,21 @@ class FCOTSeparable(OT):
         """
         Inject tiny Gaussian noise to break ties after b <- b^cc.
         """
-        intercepts = getattr(self.model, "intercepts", None)
-        if intercepts is None:
+        intercepts_param = getattr(self.model, "intercepts_param", None)
+        target_param = None
+        if intercepts_param is not None and hasattr(intercepts_param, "theta"):
+            target_param = intercepts_param.theta
+        else:
+            target_param = getattr(self.model, "intercepts", None)
+        if target_param is None:
             return
         
         # default strength relative to grid resolution
         if strength is None:
             strength = 1e-3 * float(self.model.y_accuracy)   # e.g., 2e-5 for your test
         
-        noise = torch.randn_like(intercepts) * strength
-        intercepts.add_(noise)
+        noise = torch.randn_like(target_param) * strength
+        target_param.add_(noise)
 
 
     @torch.no_grad()
@@ -611,38 +639,25 @@ class FCOTSeparable(OT):
         if "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         return checkpoint.get("iters_done", 0)
-    
-    def transport_X_to_Y(self, X):
+
+    def transport_X_to_Y(
+        self,
+        X,
+        *,
+        selection_mode: str = "hard",
+        snap_to_grid: bool = True,
+    ):
         """
-        Transport points from X to Y using the Monge map.
-        
-        The Monge map is the c-gradient of u:
-            T(x) = ∇_x^c u(x) = inverse_cx(x, ∇u(x))
-        
-        For separable models with grid-based representation and kernel_derivative,
-        we use envelope theorem for efficient gradient computation.
+        Computes the finite-separable Monge map with optional snapping control.
         """
         X = X.to(self.device)
         X.requires_grad_(True)
-        
-        # Compute u(x) with gradients
-        # Use "hard" mode for envelope theorem gradients (more efficient)
-        # Use "soft" mode for differentiable selection (smoother but slower)
-        selection_mode = "hard"
-        _, u_X = self.model.forward(X, selection_mode=selection_mode)
-        
-        # Compute ∇u(x) via backprop
-        grad_u = torch.autograd.grad(
-            u_X.sum(),
-            X,
-            create_graph=False
-        )[0]
-        
-        # Apply inverse c-gradient
-        Y_pred = self.inverse_cx(X.detach(), grad_u.detach())
-        
-        return Y_pred
-    
+        _, u_X = self.model.forward(
+            X, selection_mode=selection_mode, snap_to_grid=snap_to_grid
+        )
+        grad_u = torch.autograd.grad(u_X.sum(), X, create_graph=False)[0]
+        return self.inverse_kx(X.detach(), grad_u.detach())
+
     def _fit(
         self,
         X, Y,

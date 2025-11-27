@@ -300,8 +300,17 @@ def _to_serializable(obj):
     if isinstance(obj, (list, tuple)):
         return [_to_serializable(x) for x in obj]
     
+    import types
+
     if callable(obj):
-        return obj.__class__.__module__ + "." + obj.__class__.__qualname__
+        if isinstance(obj, types.FunctionType):
+            # Distinguish L22, L33, inverse_L22x, etc.
+            return obj.__module__ + "." + obj.__qualname__
+        # Fallback for callable classes / instances
+        module = getattr(obj, "__module__", obj.__class__.__module__)
+        qualname = getattr(obj, "__qualname__", obj.__class__.__qualname__)
+        return module + "." + qualname
+
     
     if isinstance(obj, torch.device):
         return str(obj)    # "cuda:0" or "cpu"
@@ -489,27 +498,76 @@ def greedy_neg_order(R: torch.Tensor, k: int | None = None):
     R_perm = R.index_select(0, perm).index_select(1, perm)
     return R_perm, perm
 
+def Lpp(X, Y, p=2):
+    diff = (X - Y).abs()
+    return (diff ** p).sum(dim=-1) / p
+
+
+def inverse_Lppx(X, Z, p=2):
+    # X: (..., d), Z = L_p^p/∂x at (X, Y)
+    # Returns Y solving ∇_x L_p^p(X, Y) = Z
+    assert p > 1
+    d = torch.sign(Z) * Z.abs()**(1.0 / (p - 1))
+    return X - d
+
+def nLpp(X, Y, p=2):
+    return -Lpp(X, Y, p=p)
+
+def inverse_nLppx(X, Z, p=2):
+    assert p > 1
+    d = torch.sign(Z) * Z.abs()**(1/(p - 1))
+    return X + d
+
+def Lpp_1d(x, y, p=2):
+    diff = (x - y).abs()
+    return diff ** p / p
+
+def L22_1d(x, y):
+    return Lpp_1d(x, y, p=2)
+
+def L33_1d(x, y):
+    return Lpp_1d(x, y, p=3)
+
+def L44_1d(x, y):
+    return Lpp_1d(x, y, p=4)
+
+def L55_1d(x, y):
+    return Lpp_1d(x, y, p=5)
+
+
 def L22(X, Y):
-    #computes the [||xi-yi||_2^2] euclidean squared cost between two sets of points
-    return ((X-Y)**2).sum(dim=-1)/2
+    return Lpp(X, Y, p=2)
 
-def L2(X, Y):
-    #computes the [||xi-yi||_2] euclidean cost between two sets of points
-    return torch.sqrt(((X-Y)**2).sum(dim=-1)+1e-10)
+def L33(X, Y):
+    return Lpp(X, Y, p=3)
 
-def inverse_grad_L2(X, Z):
-    #Z is the value of the gradient whose inverse we need
-    #computes the inverse gradient of the [||xi-yi||_2] euclidean cost between two sets of points
-    norm_Z = torch.clamp(torch.norm(Z, dim=-1, keepdim=True), min=1e-10)
-    return X - Z * (1.0 / norm_Z)
+def L44(X, Y):
+    return Lpp(X, Y, p=4)
 
-def inverse_grad_L22(X, Z):
-    #Z is the value of the gradient whose inverse we need
-    #computes the inverse gradient of the [||xi-yi||_2^2] euclidean squared cost between two sets of points
-    return X - Z
+def L55(X, Y):
+    return Lpp(X, Y, p=5)
+
+def inverse_L22x(X, Z):
+    return inverse_Lppx(X, Z, p=2)
+
+def inverse_L33x(X, Z):
+    return inverse_Lppx(X, Z, p=3)
+
+def inverse_L44x(X, Z):
+    return inverse_Lppx(X, Z, p=4)
+
+def inverse_L55x(X, Z):
+    return inverse_Lppx(X, Z, p=5)
 
 def project_to_box(x, R):
     """
     Projects x onto the box [-R, R] elementwise.
     """
     return x.clamp(-R, R)
+
+
+def nL22_1d(x, y):
+    return -Lpp_1d(x, y, p=2)
+
+def inverse_nL22x(X, Z):
+    return inverse_nLppx(X, Z, p=2)

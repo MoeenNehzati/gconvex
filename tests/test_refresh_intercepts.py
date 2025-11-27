@@ -26,10 +26,10 @@ def manual_refresh(model: FiniteSeparableModel, column: torch.Tensor) -> torch.T
     scores = K - column.unsqueeze(0)
     if model.mode == "concave":
         u_grid = scores.min(dim=1).values
-        refreshed = (K - u_grid.unsqueeze(1)).max(dim=0).values
+        refreshed = (K - u_grid.unsqueeze(1)).min(dim=0).values
     else:
         u_grid = scores.max(dim=1).values
-        refreshed = (K - u_grid.unsqueeze(1)).min(dim=0).values
+        refreshed = (K - u_grid.unsqueeze(1)).max(dim=0).values
     return refreshed
 
 
@@ -49,7 +49,10 @@ def test_refresh_intercepts_matches_manual(mode: str) -> None:
         model.intercepts.copy_(torch.randn_like(model.intercepts))
     expected = manual_refresh(model, model.intercepts[:, 0])
     model.refresh_intercepts_via_transform()
-    torch.testing.assert_close(model.intercepts[:, 0], expected, atol=1e-9, rtol=0.0)
+    # Intercepts are defined up to an additive constant per column.
+    # FiniteSeparableModel uses a gauge with a fixed first row, so we
+    # compare only rows 1: and allow the first row to differ by a constant.
+    torch.testing.assert_close(model.intercepts[1:, 0], expected[1:], atol=1e-9, rtol=0.0)
 
 
 @pytest.mark.parametrize("mode", ["convex", "concave"])

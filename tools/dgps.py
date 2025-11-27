@@ -104,3 +104,156 @@ def generate_gaussian_pairs(
     y = MultivariateNormal(μ_y, Σ_y).sample((n,))
     torch.save({'x': x, 'y': y, 'params': params}, fpath)
     return x, y, fpath
+
+
+def generate_gaussian_mixture_pair(
+    n: int,
+    data_dir: str = "tmp",
+    force: bool = False,
+    std: float = 0.3,
+):
+    """
+    Generate a 2D Gaussian mixture pair (X, Y).
+
+    X is drawn from a product measure:
+      X_1 ~ (1/3) N(-2, std^2) + (1/3) N(0, std^2) + (1/3) N(2, std^2)
+      X_2 ~ N(0, 1.5)
+
+    Y is drawn from a product measure:
+      Y_1 ~ N(0, 1.5)
+      Y_2 ~ (1/3) N(-2, std^2) + (1/3) N(0, std^2) + (1/3) N(2, std^2)
+    Both (X_1, X_2) and (Y_1, Y_2) are product measures (coordinates independent).
+    """
+    _ensure_dir(data_dir)
+
+    d = 2
+    params = {
+        "func": "generate_gaussian_mixture_pair",
+        "n": n,
+        "d": d,
+        "mix_means": (-2.0, 0.0, 2.0),
+        "mix_std": float(std),
+        "gauss_var": 1.5,  # variance of the Gaussian coordinate
+    }
+    fpath = make_path(data_dir, **params)
+    if os.path.exists(fpath) and not force:
+        data = torch.load(fpath)
+        return data["x"], data["y"], fpath
+
+    mix_means = torch.tensor([-2.0, 0.0, 2.0], dtype=torch.float32)
+    mix_std = float(std)
+    gauss_std = float(1.5) ** 0.5
+
+    k = mix_means.shape[0]
+    idx_x1 = torch.randint(k, (n,))
+    idx_y2 = torch.randint(k, (n,))
+
+    # X: product measure with Gaussian mixture on first coord, Gaussian on second
+    x1 = mix_means[idx_x1] + mix_std * torch.randn(n)
+    x2 = gauss_std * torch.randn(n)
+    x = torch.stack([x1, x2], dim=1)
+
+    # Y: product measure with Gaussian on first coord, Gaussian mixture on second
+    y1 = gauss_std * torch.randn(n)
+    y2 = mix_means[idx_y2] + mix_std * torch.randn(n)
+    y = torch.stack([y1, y2], dim=1)
+
+    torch.save({"x": x, "y": y, "params": params}, fpath)
+    return x, y, fpath
+
+
+def generate_grid(
+    n: int,
+    L: float,
+    std: float,
+    centers=None,
+    data_dir: str = "tmp",
+    force: bool = False,
+):
+    """
+    Generate a 2D \"grid\"-like distribution with vertical bands.
+
+    Construction:
+      - First coordinate (grid index): mixture of Gaussians
+            X_1 ~ (1/3) N(c1, std^2) + (1/3) N(c2, std^2) + (1/3) N(c3, std^2)
+            where centers = (c1, c2, c3, ...)
+      - Second coordinate (length along line): uniform on [-L, L]
+            X_2 ~ Uniform[-L, L]
+
+    This produces len(centers) approximately vertical Gaussian bands extending from -L to L.
+    """
+    _ensure_dir(data_dir)
+
+    if centers is None:
+        centers = (-2.0, 0.0, 2.0)
+    centers = tuple(float(c) for c in centers)
+
+    params = {
+        "func": "generate_grid",
+        "n": n,
+        "L": float(L),
+        "std": float(std),
+        "centers": centers,
+        "d": 2,
+    }
+    fpath = make_path(data_dir, **params)
+    if os.path.exists(fpath) and not force:
+        data = torch.load(fpath)
+        return data["x"], fpath
+
+    mix_means = torch.tensor(centers, dtype=torch.float32)
+    mix_std = float(std)
+
+    k = mix_means.shape[0]
+    idx = torch.randint(k, (n,))
+
+    x1 = mix_means[idx] + mix_std * torch.randn(n)
+    x2 = (2 * L) * torch.rand(n) - L  # Uniform[-L, L]
+    x = torch.stack([x1, x2], dim=1)
+
+    torch.save({"x": x, "params": params}, fpath)
+    return x, fpath
+
+
+def generate_grid_XY(
+    n: int,
+    L: float,
+    std: float,
+    centers=None,
+    data_dir: str = "tmp",
+    force: bool = False,
+):
+    """
+    Convenience wrapper that returns (X, Y) built from two independent
+    calls to `generate_grid`, with Y having horizontal bands.
+
+    X:
+      - Mixture of Gaussians along coord 1 (centers, std)
+      - Uniform[-L, L] along coord 2
+
+    Y:
+      - Independently generated grid as above, then coordinates swapped,
+        so Y has horizontal bands.
+    """
+    # Use separate subdirectories so cached X/Y don't collide
+    x_dir = os.path.join(data_dir, "grid_X")
+    y_dir = os.path.join(data_dir, "grid_Y")
+
+    X, _ = generate_grid(
+        n=n,
+        L=L,
+        std=std,
+        centers=centers,
+        data_dir=x_dir,
+        force=force,
+    )
+    Y_vert, _ = generate_grid(
+        n=n,
+        L=L,
+        std=std,
+        centers=centers,
+        data_dir=y_dir,
+        force=force,
+    )
+    Y = Y_vert[:, [1, 0]]
+    return X, Y
