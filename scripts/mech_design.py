@@ -5,7 +5,7 @@ import os
 import torch
 
 import config
-import models.mechanism as model
+import mech_design.mechanism as model
 from tools import utils
 from tools.feedback import logger
 

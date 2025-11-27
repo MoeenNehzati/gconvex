@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baselines.ot_fc_sep_map import FCOTSeparable
+from optimal_transport.ot_fc_sep_map import FCOTSeparable
 from tools.utils import (
     L22_1d,
     nL22_1d,

@@ -1,6 +1,6 @@
-from baselines.ot_icnn_map import ICNNOT
-from baselines.ot_gnot_map import GNOTOT
-from baselines.ot_fc_map import FCOT
+from optimal_transport.ot_icnn_map import ICNNOT
+from optimal_transport.ot_gnot_map import GNOTOT
+from optimal_transport.ot_fc_map import FCOT
 from config import WRITING_ROOT
 from scripts import gauss_params
 import argparse
@@ -15,7 +15,7 @@ if __name__ == '__main__':
     p.add_argument('--data_path', type=str, default=None, help='torch save file containing x and y arrays or the shapes')    
     p.add_argument('--generate', '-g', action='store_true', help='Generate gaussian paired data via tools.dgps')
     p.add_argument('--out', type=str, default=WRITING_ROOT, help='output directory')
-    p.add_argument('--iters', type=int, default=gauss_params.niters, help='training steps for baselines (small default)')
+    p.add_argument('--iters', type=int, default=gauss_params.niters, help='training steps for optimal_transport (small default)')
     p.add_argument('--nparams', type=int, default=gauss_params.model_size, help='number of parameters')
     p.add_argument('--inner_steps', type=int, default=gauss_params.inner_steps, help='inner loop steps')
     p.add_argument('--force_retrain', '-f', action='store_true', help='Force re-computation even if output file exists')
@@ -69,4 +69,4 @@ if __name__ == '__main__':
     
     visualize_transport(x, y, fcot)
 
-# python -m scripts.compare_baselines
+# python -m scripts.compare_optimal_transport

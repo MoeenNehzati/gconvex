@@ -156,21 +156,21 @@ Focus: neural network-based OT for general cost functionals (including class‐g
 
 Why include: the most directly related work if you’re working on non-Euclidean costs; this paper claims “general cost” setting.
 
-External baselines — clone commands
+External optimal_transport — clone commands
 ----------------------------------
 If you want to pull external baseline repositories into this project under
-`baselines/external/` (so adapters in `baselines/external` can use them), run
+`optimal_transport/external/` (so adapters in `optimal_transport/external` can use them), run
 the following commands from the repository root:
 
 ```bash
 # Clone OT-ICNN (Input-Convex Neural Networks for OT maps)
-git clone https://github.com/AmirTag/OT-ICNN baselines/external/OT-ICNN
+git clone https://github.com/AmirTag/OT-ICNN optimal_transport/external/OT-ICNN
 
 # Clone GNOT (Neural OT with general cost functionals)
-git clone https://github.com/machinestein/GNOT baselines/external/GNOT
+git clone https://github.com/machinestein/GNOT optimal_transport/external/GNOT
 
 # (Optional) If you find an official Fan et al. implementation, clone similarly
-# git clone <fan-repo-url> baselines/external/FAN
+# git clone <fan-repo-url> optimal_transport/external/FAN
 ```
 
 Notes:

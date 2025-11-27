@@ -14,7 +14,7 @@ import os
 import logging
 import torch
 import numpy as np
-from baselines.ot_fc_sep_map import FCOTSeparable
+from optimal_transport.ot_fc_sep_map import FCOTSeparable
 from tools.dgps import generate_gaussian_pairs, generate_grid_XY
 from tools.utils import (
     L22_1d,

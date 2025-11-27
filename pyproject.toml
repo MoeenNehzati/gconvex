@@ -37,7 +37,7 @@ markers = [
 # Uncomment to enable coverage reporting
 # addopts = [
 #     "--cov=models",
-#     "--cov=baselines",
+#     "--cov=optimal_transport",
 #     "--cov=tools",
 #     "--cov-report=html",
 #     "--cov-report=term-missing",

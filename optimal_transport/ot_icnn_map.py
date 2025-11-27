@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config import WRITING_ROOT
-from baselines.ot import OT
+from optimal_transport.ot import OT
 from tools.feedback import logger
 
 def count_icnn_params(dim, hidden_sizes):

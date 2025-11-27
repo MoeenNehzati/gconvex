@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils as U
 from tools.utils import hash_dict
-from baselines.ot import OT
+from optimal_transport.ot import OT
 from tools.feedback import logger
 
 

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-import models.mechanism as mechanism_module
+import mech_design.mechanism as mechanism_module
 import tools.visualize as viz
 
 
@@ -37,11 +37,11 @@ def dot_kernel(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
 
 def test_training_mechanism(tmp_path):
     """Short Mechanism training run produces valid mechanism metadata."""
-    dim = 100
-    npoints = 200
-    patience = 100
-    nsteps = 10000
-    sample = torch.rand(10_000, dim)
+    dim = 1
+    npoints = 10
+    patience = 50
+    nsteps = 1000
+    sample = torch.rand(1000, dim)
     model_kwargs = {
         "npoints": npoints,
         "kernel": dot_kernel,

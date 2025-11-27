@@ -5,7 +5,7 @@ import os
 here = os.path.abspath(os.path.dirname(__file__))
 long_description = """
 gconvex: Finitely convex parametrization of generalized convex functions
-and experimental baselines for Monge map / optimal transport comparisons.
+and experimental optimal_transport for Monge map / optimal transport comparisons.
 """
 try:
     with io.open(os.path.join(here, "README.md"), encoding="utf-8") as f:
@@ -16,7 +16,7 @@ except Exception:
 setup(
     name="gconvex",
     version="0.1.0",
-    description="Finitely convex parametrization and OT baselines",
+    description="Finitely convex parametrization and OT optimal_transport",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Moeen Nehzati",

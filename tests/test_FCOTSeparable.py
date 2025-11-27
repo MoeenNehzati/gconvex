@@ -1,6 +1,6 @@
 import torch
 import pytest
-from baselines.ot_fc_sep_map import FCOTSeparable
+from optimal_transport.ot_fc_sep_map import FCOTSeparable
 from models import FiniteSeparableModel
 
 
@@ -206,7 +206,7 @@ def test_training_makes_progress():
 
     import math
     import torch
-    from baselines.ot_fc_sep_map import FCOTSeparable
+    from optimal_transport.ot_fc_sep_map import FCOTSeparable
 
     torch.manual_seed(0)
 

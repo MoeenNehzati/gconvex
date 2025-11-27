@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from baselines.ot import OT
+from optimal_transport.ot import OT
 import logging
 import math
 from models import FiniteSeparableModel
