@@ -12,7 +12,7 @@ Layout
 - `optimal_transport/ot_icnn_map.py` – ICNN-based OT baseline (`ICNNOT`) with alternating f/g updates.
 - `tools/` – utilities (kernels, loaders, NaN hooks), synthetic data generators (`dgps.py`), visualization helpers (`visualize.py`), logging (`feedback.py`), and selection ops (`utils.py`).
 - `scripts/` – runnable experiments:
-  - `mech_design.py` sweeps mechanism-design configs across dimensions/kernels.
+  - `solve_mechanisms.py` sweeps mechanism-design configs across dimensions/kernels.
   - `run_finite_ot.py` runs FCOT-Separable on DGPS data with plotting hooks.
   - `compare_baselines.py` compares OT baselines on Gaussian pairs.
   - `plot_training_log.py` renders training curves from log files.
@@ -74,7 +74,7 @@ Running scripts
 ---------------
 - Mechanism sweep (writes under `WRITING_ROOT/mech/`):
   ```bash
-  python scripts/mech_design.py --niters 20000 --batch-size 512
+  python scripts/solve_mechanisms.py --niters 20000 --batch-size 512
   ```
 - FCOT-Separable DGPS experiment:
   ```bash
@@ -97,4 +97,4 @@ pytest tests/ -n auto
 
 Artifacts
 ---------
-Most scripts write checkpoints/plots under paths prefixed by `WRITING_ROOT` (see `config.py`). Set it to a desired location before running experiments. `scripts/compare_baselines.py --out ...` and `scripts/mech_design.py --clear` control output directories and cleanup.
+Most scripts write checkpoints/plots under paths prefixed by `WRITING_ROOT` (see `config.py`). Set it to a desired location before running experiments. `scripts/compare_baselines.py --out ...` and `scripts/solve_mechanisms.py --clear` control output directories and cleanup.
