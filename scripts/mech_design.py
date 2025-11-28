@@ -1,85 +1,147 @@
 import argparse
-import math
 import os
-
+import shutil
+from math import exp
+import numpy as np
 import torch
+from config import WRITING_ROOT
+import mech_design.mechanism as mechanism_module
 
-import config
-import mech_design.mechanism as model
-from tools import utils
-from tools.feedback import logger
+parser = argparse.ArgumentParser(description="Run mechanism design sweep.")
+parser.add_argument(
+    "-c",
+    "--clear",
+    action="store_true",
+    help="Remove existing snapshots in the writing_dir before training.",
+)
+parser.add_argument(
+    "--batch-size",
+    type=int,
+    default=512,
+    help="Chunk size used when computing the kernel to limit memory.",
+)
+parser.add_argument(
+    "--niters",
+    type=int,
+    default=20_000,
+    help="Number of training iterations (passed as nsteps).",
+)
+parser.add_argument(
+    "--epsilon",
+    type=float,
+    default=5e-4,
+    help="Barrier epsilon threshold for the constraints.",
+)
+args = parser.parse_args()
+writing_dir_base = f"{WRITING_ROOT}mech/"
+if args.clear:
+    shutil.rmtree(writing_dir_base, ignore_errors=True)
+    print(f"Cleared {writing_dir_base}")
 
+torch.manual_seed(1)
 
-if __name__ == "__main__":
-    torch.manual_seed(2)
-    parser = argparse.ArgumentParser(description="Run matching and genetics experiment.")
-    parser.add_argument("-c", "--correlated", action="store_true", help="Use correlated sample")
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set logging level (default: INFO)",
-    )
-    parser.set_defaults(correlated=False)
-    args = parser.parse_args()
+def candidate_scale(dim: int, base: float = 5.0, target: float = 999.0, growth: float = 0.01) -> float:
+    """Return a smoothly growing candidate size as dim increases.
 
-    from tools.feedback import set_log_level
+    The value starts at `base` when `dim == 1` and approaches `base + target`
+    as `dim` grows.  The `growth` rate controls how quickly the curve rises
+    (larger values push it toward the ceiling faster).  The formula uses an
+    exponential ramp so the list comprehension stays lightweight and monotonic.
+    """
+    return base + target * (1 - exp(-growth * (dim - 1)))
 
-    set_log_level(args.log_level)
+def dot_kernel(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    return (X * Y).sum(dim=-1)
 
-    desc = "correlated" if args.correlated else "independant"
+def mismatch_kernel(X: torch.Tensor, Y: torch.Tensor, α=4., κ=2.) -> torch.Tensor:
+    """Returns a bounded surplus that grows when the bundle exceeds the type."""
+    return κ*torch.sigmoid(α * (Y - X)).sum(dim=-1)
 
-    max_dim = config.MAX_DIM
-    rank = config.RANK
-    joint_dir = utils.generate_dir_and_name(f"{config.WRITING_ROOT}{desc}/", **config.PATH_RELEVANT_KWARGS)
-    sample_path = f"{joint_dir}sample.pt"
-    if os.path.exists(sample_path):
-        data = torch.load(sample_path)
-        all_sample = data["all_sample"]
-        logger.info(f"Loaded sample from {sample_path}")
-    else:
-        if desc == "correlated":
-            L = torch.randn(max_dim, rank)
-            row_norms = torch.norm(L, dim=1, keepdim=True).clamp_min(1e-12)
-            L = L * (config.ROW_NORM_TARGET / row_norms)
-            LLt_diag = (L * L).sum(dim=1)
-            uniq = (1.0 - LLt_diag).clamp_min(1e-9)
-            R = L @ L.T + torch.diag(uniq)
-            jitter = 1e-5
-            R = R + jitter * torch.eye(max_dim)
-            R, _ = utils.greedy_neg_order(R)
-            Lc = torch.linalg.cholesky(R)
-            z = torch.randn(config.EXPECTATION_SAMPLE_SIZE, max_dim) @ Lc.T
-            all_sample = 0.5 * (1.0 + torch.erf(z / math.sqrt(2)))
-            torch.save(
-                {
-                    "L": L,
-                    "R": R,
-                    "Lc": Lc,
-                    "all_sample": all_sample,
-                },
-                sample_path,
-            )
-            logger.info(
-                f"Generated correlated sample with all_sample.shape={all_sample.shape}, R={R}, Lc={Lc}"
-            )
-        if desc == "independant":
-            all_sample = torch.rand(config.EXPECTATION_SAMPLE_SIZE, max_dim)
-            torch.save({"all_sample": all_sample}, sample_path)
-            logger.info(f"Generated independant sample with all_sample.shape={all_sample.shape}")
+def euclidean_cost(Y, β=1.0, ε=1e-4):
+    return β * (torch.sqrt(Y**2 + ε**2) - ε).sum(dim=-1)
 
-    for dim, npoints in zip(config.DIMS, config.NPOINTS):
-        model_kwargs = config.MODEL_KWARGS.copy()
-        model_kwargs["y_dim"] = dim
-        model_kwargs["npoints"] = npoints
-        dir = utils.generate_dir_and_name(joint_dir, dim=dim)
-        mechanism, mechanism_data = model.run(
-            all_sample[:, :dim],
-            config.MODES,
+epsilon = args.epsilon
+dims = [2]#[1, 2, 4, 6, 20, 100, 250, 500]#[::-1]
+npoints_per_dim = [10]#[int(candidate_scale(d, base=5, target=275, growth=0.015)) for d in dims]
+print("npoints per dim:", npoints_per_dim)
+patience = 300
+factor = 0.6
+nsteps = args.niters
+max_samples = 10_000
+temp = 60.
+temp_warmup_steps = 500
+temp_schedule_initial = 1.0
+lr = 0.05
+convergence_tolerance = 1e-6
+sorted_model = False
+is_Y_parameter = True
+is_there_default = True
+window = 1000
+default_utility = 2*epsilon
+scheduler_threshold = 1e-2
+max_clipping_norm = 10
+unif_sample = torch.rand(max_samples, max(dims))
+lognormal_sample = torch.exp(torch.randn(max_samples, max(dims)) * 0.5)
+
+costs = [None]#,euclidean_cost, ]
+kernels = [dot_kernel]#, mismatch_kernel]
+samples = [unif_sample]#lognormal_sample]
+y_maxes = [1.0]#, None]
+
+for y_max, cost, kernel, sample in zip(y_maxes, costs, kernels, samples):
+    for dim, npoints in zip(dims, npoints_per_dim):
+        print(y_max, cost, kernel, sample, dim, npoints)
+        print(f"Running mechanism design for dim={dim}, npoints={npoints}")
+        sample = sample[:, :dim]
+        if sorted_model:
+            sample, _ = torch.sort(sample, dim=-1)
+        model_kwargs = {
+            "npoints": npoints,
+            "kernel": kernel,
+            "cost_fn": cost,
+            "y_dim": dim,
+            "temp": temp,
+            "is_Y_parameter": is_Y_parameter,
+            "is_there_default": is_there_default,
+            "default_intercept": -default_utility,
+            "y_min": 0.0,
+            "y_max": y_max,
+            "sorted_model": sorted_model,
+        }
+        mechanism_instance = mechanism_module.Mechanism(**model_kwargs, kernel_batch_size=args.batch_size)
+        # with torch.no_grad():
+        #     mechanism_instance.Y_rest_raw.fill_(1.0)      # push all candidate bundles to 1
+        #     mechanism_instance.intercept_rest.fill_(0.0)   # start every price at zero
+
+        writing_dir_dim = os.path.join(writing_dir_base, f"dim{dim}/")
+
+        mechanism, mechanism_data = mechanism_instance.fit(
+            sample,
+            already_sorted=True,
+            modes=["soft"],
             compile=True,
-            model_kwargs=model_kwargs,
-            optimizers_kwargs_dict=config.OPTIMIZERS_KWARGS_DICT,
-            schedulers_kwargs_dict=config.SCHEDULERS_KWARGS_DICT,
-            train_kwargs={**config.TRAIN_KWARGS, "writing_dir": dir},
+            optimizers_kwargs_dict={"soft": {"lr": lr}},
+            schedulers_kwargs_dict={
+                "soft": {
+                    "patience": patience,
+                    "threshold": scheduler_threshold,
+                    "factor": factor,
+                    "cooldown": patience,
+                    "eps": 1e-8,
+                },
+            },
+            train_kwargs={
+                "nsteps": nsteps,
+                "max_clipping_norm": max_clipping_norm,
+                "steps_per_snapshot": 200,
+                "steps_per_update": 5,
+                "window": window,
+                "constraint_fns": [],
+                "use_wandb": False,
+                "writing_dir": writing_dir_dim,
+                "convergence_tolerance": convergence_tolerance,
+                "epsilon": epsilon,
+                "temp_warmup_steps": temp_warmup_steps,
+                "temp_schedule_initial": temp_schedule_initial,
+            },
         )

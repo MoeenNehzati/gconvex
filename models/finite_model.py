@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from optimal_transport.ot import OT
 import logging
@@ -1234,6 +1235,8 @@ class FiniteModel(nn.Module):
         y_max: Optional[float] = None,
         original_dist_to_bounds: float = 1e-1,
         is_there_default: bool = False,
+        default_intercept: float = 0.0,
+        sorted_model: bool = False,
     ):
         super().__init__()
         assert mode in ("convex", "concave")
@@ -1247,6 +1250,8 @@ class FiniteModel(nn.Module):
         self.y_min = y_min
         self.y_max = y_max
         self.original_dist_to_bounds = original_dist_to_bounds
+        self.sorted_model = sorted_model
+        self.default_intercept = default_intercept
 
         self.kernel_fn = kernel
 
@@ -1256,27 +1261,20 @@ class FiniteModel(nn.Module):
         Y_init = torch.randn(1, num_candidates, num_dims)
         min_val, max_val = Y_init.min(), Y_init.max()
 
-        if (y_min is not None) and (y_max is not None):
-            centered = Y_init - Y_init.mean()
-            max_abs = centered.abs().max() + 1e-4
-            mid = 0.5 * (y_min + y_max)
-            half = 0.5 * (y_max - y_min)
-            Y_init = mid + half * centered / max_abs
-        elif y_min is not None:
-            Y_init = Y_init - min_val + (y_min + original_dist_to_bounds)
-        elif y_max is not None:
-            Y_init = max_val - Y_init + (y_max - original_dist_to_bounds)
+        if not sorted_model:
+            Y_init = self._initialize_Y_init(Y_init, min_val, max_val)
 
         if is_y_parameter:
-            self.Y_rest = nn.Parameter(Y_init)
+            self._Y_rest_param = nn.Parameter(Y_init)
         else:
-            self.register_buffer("Y_rest", Y_init)
+            self.register_buffer("_Y_rest_param", Y_init)
 
         self.intercept_rest = nn.Parameter(torch.zeros(1, num_candidates))
 
         # Optional default option
         self.register_buffer("Y0", torch.zeros(1,1,num_dims))
-        self.register_buffer("intercept0", torch.zeros(1,1))
+        intercept0_value = Y_init.new_full((1, 1), default_intercept)
+        self.register_buffer("intercept0", intercept0_value)
 
         # ---------------------------------------------------------
         # GLOBAL per-datapoint warm start buffers
@@ -1285,10 +1283,64 @@ class FiniteModel(nn.Module):
         self._warm_X_global = None
         self._num_global_points = None
 
+    def _initialize_Y_init(self, Y_init: torch.Tensor, min_val: torch.Tensor, max_val: torch.Tensor) -> torch.Tensor:
+        if (self.y_min is not None) and (self.y_max is not None):
+            centered = Y_init - Y_init.mean()
+            max_abs = centered.abs().max() + 1e-4
+            mid = 0.5 * (self.y_min + self.y_max)
+            half = 0.5 * (self.y_max - self.y_min)
+            return mid + half * centered / max_abs
+        elif self.y_min is not None:
+            return Y_init - min_val + (self.y_min + self.original_dist_to_bounds)
+        elif self.y_max is not None:
+            return max_val - Y_init + (self.y_max - self.original_dist_to_bounds)
+        return Y_init
+
 
     # ============================================================
-    # Helpers: full Y / full intercept
+    # Helpers: Y accessors / full intercepts
     # ============================================================
+
+    @property
+    def Y_rest(self):
+        base = self._Y_rest_param
+        if not self.sorted_model:
+            # Unsorted model: just return the Y
+            return base
+
+        increments = F.softplus(base)
+        sorted_Y = torch.cumsum(increments, dim=-1)
+        sorted_Y = self._rescale_to_range(sorted_Y)
+        return sorted_Y
+
+    def _rescale_to_range(self, Y: torch.Tensor) -> torch.Tensor:
+        if self.y_min is None and self.y_max is None:
+            return Y
+
+        if self.y_min is not None and self.y_max is not None:
+            raw_min = Y.amin(dim=1, keepdim=True)
+            raw_max = Y.amax(dim=1, keepdim=True)
+            span = raw_max - raw_min
+            if (span <= 1e-6).all():
+                return self._rescale_bounds_clamp(Y)
+            target_span = self.y_max - self.y_min
+            return (Y - raw_min) / span * target_span + self.y_min
+
+        if self.y_min is not None:
+            raw_min = Y.amin(dim=1, keepdim=True)
+            return (Y + (self.y_min - raw_min)).clamp(min=self.y_min)
+
+        raw_max = Y.amax(dim=1, keepdim=True)
+        return (Y + (self.y_max - raw_max)).clamp(max=self.y_max)
+
+    def _rescale_bounds_clamp(self, Y: torch.Tensor) -> torch.Tensor:
+        lower = self.y_min if self.y_min is not None else float("-inf")
+        upper = self.y_max if self.y_max is not None else float("inf")
+        return torch.clamp(Y, min=lower, max=upper)
+
+    @property
+    def Y_rest_raw(self):
+        return self._Y_rest_param
 
     def full_Y(self):
         if self.is_there_default:
@@ -1305,20 +1357,38 @@ class FiniteModel(nn.Module):
     # Forward: MAX or MIN over candidates
     # ============================================================
 
-    def forward(self, X: torch.Tensor, selection_mode: str = "soft"):
+    def forward(self, X: torch.Tensor, selection_mode: str = "soft", already_sorted: bool = False):
         """
         Compute f(x) for x ∈ R^{num_samples × num_dims} using either
         max_j or min_j of the kernel scores.
         """
+        if self.sorted_model and not already_sorted:
+            X = torch.sort(X, dim=-1).values
         Y = self.full_Y()             # (1, num_candidates, num_dims)
         b = self.full_intercept()     # (1, num_candidates)
+        batch_size = getattr(self, "kernel_batch_size", None)
+        def _compute_chunk(X_chunk):
+            scores_chunk = self.kernel_fn(X_chunk[:, None, :], Y) - b
+            if self.mode == "convex":
+                return moded_max(scores_chunk, Y, dim=1, temp=self.temp, mode=selection_mode)
+            return moded_min(scores_chunk, Y, dim=1, temp=self.temp, mode=selection_mode)
 
-        scores = self.kernel_fn(X[:,None,:], Y) - b
-
-        if self.mode == "convex":
-            choice, f_x, aux = moded_max(scores, Y, dim=1, temp=self.temp, mode=selection_mode)
+        if batch_size is None or batch_size <= 0 or X.shape[0] <= batch_size:
+            choice, f_x, aux = _compute_chunk(X)
         else:
-            choice, f_x, aux = moded_min(scores, Y, dim=1, temp=self.temp, mode=selection_mode)
+            choices = []
+            fxs = []
+            last_aux = {}
+            for start in range(0, X.shape[0], batch_size):
+                end = start + batch_size
+                X_chunk = X[start:end]
+                choice_chunk, f_x_chunk, aux_chunk = _compute_chunk(X_chunk)
+                choices.append(choice_chunk)
+                fxs.append(f_x_chunk)
+                last_aux = aux_chunk
+            choice = torch.cat(choices, dim=0)
+            f_x = torch.cat(fxs, dim=0)
+            aux = last_aux
 
         # Diagnostics
         self._last_weights = aux.get("weights")
