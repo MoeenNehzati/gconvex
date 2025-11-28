@@ -456,11 +456,17 @@ def IR_constraint(mechanism, mechanism_data, kappa = 100):
 def model_min_constraint(mechanism, mechanism_data, kappa=100):
     #Constraints are supposed to be positive
     #returns the distance between Y and its supposed minimum
+    if mechanism.y_min is None:
+        # No lower bound specified; treat as no constraint.
+        return torch.zeros_like(mechanism.Y_rest)
     return mechanism.Y_rest - mechanism.y_min
     
 def model_max_constraint(mechanism, mechanism_data, kappa=100):
     #Constraints are supposed to be positive
     #returns the distance between Y and its supposed minimum
+    if mechanism.y_max is None:
+        # No upper bound specified; treat as no constraint.
+        return torch.zeros_like(mechanism.Y_rest)
     return mechanism.y_max - mechanism.Y_rest
 
 @torch.no_grad()

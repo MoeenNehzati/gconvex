@@ -134,10 +134,17 @@ class Mechanism(FiniteModel):
         return os.path.join(path, "*")
 
     @staticmethod
-    def _load_final_if_exists(writing_dir: str, run_id: Optional[str] = None) -> Optional[nn.Module]:
+    def _load_final_if_exists(
+        writing_dir: str,
+        run_id: Optional[str] = None,
+        run_hash: Optional[str] = None,
+    ) -> Optional[nn.Module]:
         pattern = os.path.join(writing_dir, "*final*")
         finals = glob.glob(pattern)
-        if run_id:
+        if run_hash:
+            short = run_hash[:8]
+            finals = [p for p in finals if short in os.path.basename(p)]
+        elif run_id:
             finals = [p for p in finals if run_id in os.path.basename(p)]
         if finals:
             latest_final = max(finals, key=os.path.getmtime)
@@ -390,7 +397,11 @@ class Trainer:
             logger.info(f"📊 WandB Run: {self.wandb_run_url}")
 
     def _load_final_if_exists(self) -> Optional[nn.Module]:
-        return Mechanism._load_final_if_exists(self.writing_dir, run_id=self.run_id)
+        return Mechanism._load_final_if_exists(
+            self.writing_dir,
+            run_id=self.run_id,
+            run_hash=self.run_hash,
+        )
 
     def _load_latest_checkpoint(self) -> Optional[Tuple[Any, Any, Any]]:
         result = Mechanism._load_latest_checkpoint(self.writing_dir)

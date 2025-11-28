@@ -38,7 +38,7 @@ if args.clear:
     shutil.rmtree(writing_dir_base, ignore_errors=True)
     print(f"Cleared {writing_dir_base}")
 
-torch.manual_seed(1)
+torch.manual_seed(0)
 
 def candidate_scale(dim: int, base: float = 5.0, target: float = 999.0, growth: float = 0.01) -> float:
     """Return a smoothly growing candidate size as dim increases.
@@ -61,10 +61,10 @@ def euclidean_cost(Y, β=1.0, ε=1e-4):
     return β * (torch.sqrt(Y**2 + ε**2) - ε).sum(dim=-1)
 
 epsilon = args.epsilon
-dims = [2]#[1, 2, 4, 6, 20, 100, 250, 500]#[::-1]
-npoints_per_dim = [10]#[int(candidate_scale(d, base=5, target=275, growth=0.015)) for d in dims]
+dims = [1, 2, 4, 6, 20, 100, 250, 500]#[::-1]
+npoints_per_dim = [int(candidate_scale(d, base=2, target=275, growth=0.015)) for d in dims]
 print("npoints per dim:", npoints_per_dim)
-patience = 300
+patience = 400
 factor = 0.6
 nsteps = args.niters
 max_samples = 10_000
@@ -73,26 +73,27 @@ temp_warmup_steps = 500
 temp_schedule_initial = 1.0
 lr = 0.05
 convergence_tolerance = 1e-6
-sorted_model = False
+sorted_model = True
 is_Y_parameter = True
 is_there_default = True
 window = 1000
-default_utility = 2*epsilon
+default_utility = 4*epsilon
 scheduler_threshold = 1e-2
 max_clipping_norm = 10
 unif_sample = torch.rand(max_samples, max(dims))
 lognormal_sample = torch.exp(torch.randn(max_samples, max(dims)) * 0.5)
 
-costs = [None]#,euclidean_cost, ]
-kernels = [dot_kernel]#, mismatch_kernel]
-samples = [unif_sample]#lognormal_sample]
-y_maxes = [1.0]#, None]
+costs = [None,euclidean_cost, ]
+kernels = [dot_kernel, mismatch_kernel]
+samples = [unif_sample, lognormal_sample]
+y_maxes = [1.0, None]
 
-for y_max, cost, kernel, sample in zip(y_maxes, costs, kernels, samples):
+for y_max, cost, kernel, big_sample in zip(y_maxes, costs, kernels, samples):
     for dim, npoints in zip(dims, npoints_per_dim):
-        print(y_max, cost, kernel, sample, dim, npoints)
+        torch.manual_seed(1)
+        print(y_max, cost, kernel, big_sample, dim, npoints)
         print(f"Running mechanism design for dim={dim}, npoints={npoints}")
-        sample = sample[:, :dim]
+        sample = big_sample[:, :dim]
         if sorted_model:
             sample, _ = torch.sort(sample, dim=-1)
         model_kwargs = {
