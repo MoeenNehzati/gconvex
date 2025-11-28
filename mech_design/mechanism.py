@@ -1,10 +1,12 @@
+"""Mechanism design helpers built on ``FiniteModel`` with logging and training utilities."""
+
 import glob
+import json
 import math
 import os
 import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import json
 
 import torch
 from torch import nn
@@ -112,6 +114,7 @@ class Mechanism(FiniteModel):
         return model
 
     def compute_mechanism(self, sample: torch.Tensor, mode: str = "soft", already_sorted: bool = False) -> Dict[str, Any]:
+        """Compute choice, utility, and profit statistics for a sample batch."""
         choice, v = self.forward(sample, selection_mode=mode, already_sorted=already_sorted)
         ker = self.kernel_fn(sample, choice)
         revenue = ker - v
@@ -139,6 +142,7 @@ class Mechanism(FiniteModel):
         run_id: Optional[str] = None,
         run_hash: Optional[str] = None,
     ) -> Optional[nn.Module]:
+        """Return the latest saved final mechanism matching ID/hash when available."""
         pattern = os.path.join(writing_dir, "*final*")
         finals = glob.glob(pattern)
         if run_hash:
@@ -155,6 +159,7 @@ class Mechanism(FiniteModel):
 
     @staticmethod
     def _load_latest_checkpoint(writing_dir: str) -> Optional[Tuple[Any, Any, Any, int, str]]:
+        """Return most recent checkpoint (mechanism, optimizer, scheduler, epoch, run_id)."""
         pattern = os.path.join(writing_dir, "*epoch_*.pt")
         snapshots = glob.glob(pattern)
         if not snapshots:
@@ -179,6 +184,7 @@ class Mechanism(FiniteModel):
 
     @staticmethod
     def _save_snapshot(prefix: str, epoch: int, mechanism: nn.Module, optimizer: Any, scheduler: Any) -> None:
+        """Persist mechanism/optimizer/scheduler state for resume."""
         snapshot_path = f"{prefix}epoch_{epoch}.pt"
         torch.save({"mechanism": mechanism, "optimizer": optimizer, "scheduler": scheduler}, snapshot_path)
         logger.info(f"Epoch {epoch}: Saved snapshot to {snapshot_path}")
@@ -193,7 +199,13 @@ class Mechanism(FiniteModel):
         train_kwargs: Optional[Dict[str, Any]] = None,
         already_sorted: bool = False,
     ) -> Tuple[nn.Module, Dict[str, Any]]:
-        """Train the mechanism via the shared Trainer helper."""
+        """Train the mechanism via the shared Trainer helper.
+
+        Returns
+        -------
+        Tuple[nn.Module, Dict[str, Any]]
+            The trained mechanism and a batch of computed mechanism outputs for logging.
+        """
         optimizers_kwargs_dict = optimizers_kwargs_dict or {}
         schedulers_kwargs_dict = schedulers_kwargs_dict or {}
         train_kwargs = dict(train_kwargs) if train_kwargs is not None else {}
@@ -279,6 +291,7 @@ class Mechanism(FiniteModel):
         schedulers_kwargs_dict: Dict[str, Any],
         train_kwargs: Dict[str, Any],
     ) -> str:
+        """Hash training configuration for checkpoint identification."""
         sample_cpu = sample.detach().cpu()
         info = {
             "kernel": self.kernel,
@@ -326,6 +339,7 @@ class Trainer:
         temp_warmup_steps: Optional[int] = None,
         temp_schedule_initial: float = 0.0,
     ) -> None:
+        """Prepare optimizer/scheduler state, logging, and checkpoint metadata."""
         self.sample = sample
         self.mechanism = mechanism
         self.already_sorted = already_sorted
@@ -430,6 +444,7 @@ class Trainer:
         return self.temp_schedule_initial + (self.base_temp - self.temp_schedule_initial) * cosine
 
     def run(self) -> Tuple[nn.Module, Dict[str, Any]]:
+        """Execute the training loop, returning the trained mechanism and rollout data."""
         final = self._load_final_if_exists()
         if final is not None:
             logger.info("Final mechanism found; returning it.")
@@ -464,6 +479,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 mechanism_data = self.mechanism.compute_mechanism(self.sample, mode=self.mode, already_sorted=self.already_sorted)
 
+                # Evaluate all constraint functions on the current batch.
                 constraint_vals = [fn(self.mechanism, mechanism_data).reshape(-1) for fn in self.constraint_fns]
                 violations = [(-c).clamp_min(0.0) for c in constraint_vals]
                 penalties = torch.stack([barrier(c, epsilon=self.epsilon, reduction="sum") for c in constraint_vals]) if constraint_vals else torch.tensor([])
@@ -480,6 +496,7 @@ class Trainer:
                     else:
                         minimum_constraint_value = []
 
+                # Compute the aggregate penalty-weighted gain to bias optimization.
                 weighted_penalties = (penalties * self.penalty_factors).sum() if penalties.numel() > 0 else torch.tensor(0.0)
                 if penalties.numel() > 0 and penalties.isnan().any():
                     logger.error(
@@ -494,6 +511,7 @@ class Trainer:
                 l_scaler = l.item()
                 self.ls.append(l_scaler)
 
+                # Track gradient norm for logging/clipping purposes.
                 total_gradient_norm = 0.0
                 for p in self.mechanism.parameters():
                     if p.grad is not None:
@@ -549,6 +567,7 @@ class Trainer:
                     except Exception:
                         logger.debug("wandb.log failed during training step")
 
+                # Check for convergence by monitoring stabilization of loss signal.
                 if epoch >= self.window:
                     recent = self.ls[-self.window:]
                     max_diff = max(abs(recent[i] - recent[i - 1]) for i in range(1, self.window))
@@ -647,6 +666,7 @@ def run(
     schedulers_kwargs_dict: Optional[Dict[str, Dict[str, Any]]] = None,
     with_hook: bool = False,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
+    """Utility entry point that builds a mechanism and trains it via ``Mechanism.fit``."""
     if model_kwargs is None:
         model_kwargs = {}
     mechanism = Mechanism.with_hooks(**model_kwargs) if with_hook else Mechanism(**model_kwargs)

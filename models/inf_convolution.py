@@ -1,3 +1,5 @@
+"""LBFGS-only infimal convolution solver used in mechanism training."""
+
 import torch
 from torch.autograd import Function
 from torch.nn.utils import stateless
@@ -35,6 +37,8 @@ class InfConvolution(Function):
         patience: int = 5,
         projection=None,
     ):
+        """Run LBFGS solve for x* minimizing K(x,y) - f(x) + 0.5 * lam ||x||^2."""
+
         if optimizer.lower() != "lbfgs":
             raise ValueError("InfConvolution only supports LBFGS in solver-only mode.")
 
@@ -138,5 +142,5 @@ class InfConvolution(Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
-        # solver is non-differentiable: all inputs get None
+        """Backward hook returns None because solver does not propagate gradients."""
         return (None,) * 11

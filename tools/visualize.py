@@ -1,23 +1,26 @@
 from __future__ import annotations
+"""Evaluation and plotting helpers for mechanism visualization tasks."""
+
 import os
-from typing import Tuple, Optional
-import pandas as pd
-import numpy as np
-import torch
+from typing import Optional, Tuple
+
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
+import numpy as np
+import pandas as pd
+import torch
+from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.patches import Patch
-from tools.utils import loader
-from tools.feedback import logger
+
 from config import WRITING_ROOT
-# Try to use config.WRITING_DIR by default; fall back to None (show plots)
+from tools.feedback import logger
+from tools.utils import loader
 
 # ---------- core save/show helper ----------
 
 def _save_or_show(fig: plt.Figure, filename: str, save_dir: Optional[str] = WRITING_ROOT):
     """
-    If save_dir is provided (or config.WRITING_DIR is available), save the figure there.
-    Otherwise, display it interactively.
+    Save the figure under `save_dir` (defaults to config.WRITING_ROOT), or
+    display it interactively if save_dir is None.
     """
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)

@@ -1,17 +1,20 @@
-import logging
-import torch
-import itertools
+"""Logging helpers and live status rendering utilities used across training scripts."""
+
+import base64
 import io
-from rich.panel import Panel
-from rich.text import Text
-from rich.live import Live
+import itertools
+import logging
 from rich.console import Console
+from rich.live import Live
 from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.theme import Theme
+from rich.text import Text
+
+import numpy as np
+import torch
 from IPython import display
 from tools.utils import IN_JUPYTER
-from rich.theme import Theme
-import base64
-import numpy as np
 
 precision = 8
 width = precision+7
@@ -131,6 +134,7 @@ def make_status_panel(data: dict) -> Panel:
     return Panel(text, title=f"Training Status", border_style="bold white")
 
 def render_panel_and_logs(panel: Panel) -> str:
+    """Render the Rich panel and recent logs into a single HTML snippet."""
     panel_console = Console(record=True)
     panel_console.print(panel)
     panel_html = panel_console.export_html(inline_styles=True)
@@ -176,6 +180,8 @@ def render_panel_and_logs(panel: Panel) -> str:
     return iframe
 
 class LiveOrJupyter:
+    """Context manager exposing a live status panel in terminal or Jupyter."""
+
     def __init__(self):
         self._live = None
         self._display_handle = None
@@ -196,6 +202,7 @@ class LiveOrJupyter:
             self._live.__exit__(exc_type, exc_val, exc_tb)
 
     def update(self, panel: Panel):
+        """Refresh the display with a new panel snapshot."""
         if IN_JUPYTER:
             html = render_panel_and_logs(panel)
             self._display_handle.update(display.HTML(html))

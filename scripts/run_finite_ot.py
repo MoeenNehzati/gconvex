@@ -1,10 +1,14 @@
-import os
+"""Script to run FCOT-Separable on DGPS data and plot running statistics."""
+
 import logging
-import torch
+import os
+
 import numpy as np
+import torch
 
 from optimal_transport.ot_fc_sep_map import FCOTSeparable
 from tools.dgps import generate_gaussian_pairs, generate_grid_XY
+from tools.feedback import set_log_level
 from tools.utils import (
     L22_1d,
     L33_1d,
@@ -17,7 +21,6 @@ from tools.utils import (
     nL22_1d,
     inverse_nL22x,
 )
-from tools.feedback import set_log_level
 
 
 SEED = 42
@@ -67,6 +70,7 @@ INV_KERNELS = [inverse_L22x, inverse_nL22x]
 
 
 def _setup_randomness_and_threads():
+    """Seed random generators and limit thread usage for reproducible runs."""
     torch.manual_seed(SEED)
     set_log_level(LOG_LEVEL)
 
@@ -99,6 +103,7 @@ def _build_solver(
         ny = ny_override
     n_params = ny * dim
 
+    """Instantiate FCOTSeparable solver with the requested kernel/grid resolution."""
     fcot = FCOTSeparable.initialize_right_architecture(
         dim=dim,
         radius=radius,
@@ -122,6 +127,7 @@ def _build_solver(
 
 
 def _compute_transport(solver: FCOTSeparable, X: torch.Tensor) -> torch.Tensor:
+    """Helper to evaluate the learned Monge map (c-gradient) on new points."""
     X_req = X.to(solver.device).requires_grad_(True)
     _, u_X = solver.model.forward(X_req, selection_mode="hard")
     grad_u = torch.autograd.grad(u_X.sum(), X_req, create_graph=False)[0]

@@ -171,6 +171,7 @@ def run_forward_and_gradient_check(
     accuracy: float = 1.0,
     cache_gradients: bool = False,
 ):
+    """Validate forward choices/values and ∂f/∂x against analytic and FD references."""
     print(f"\n[Dimension {num_dims}] Running forward and gradient checks (mode={mode}, p={kernel_power})...")
     kernel_fn = make_lp_kernel(kernel_power)
     model = build_model(
@@ -248,6 +249,7 @@ def compute_expected_intercept_grad(model: FiniteSeparableModel, choice: torch.T
 
 
 def run_fine_grid_forward_param_gradients(mode: str = "convex", cache_gradients: bool = False):
+    """Check parameter gradients on a dense grid against brute-force counts."""
     print(f"\n[Fine Grid] Forward values and parameter gradients (mode={mode})...")
     radius = 0.5
     accuracy = 1e-3
@@ -320,6 +322,7 @@ def evaluate_transform_reference(model: FiniteSeparableModel, Z: torch.Tensor, m
 
 
 def run_sup_transform_gradient_relation(mode: str = "convex", kernel_power: int = 2, cache_gradients: bool = False):
+    """Verify ∇_b sup_transform = -∇_b f(X*) for sup over the grid."""
     print(f"\n[Sup Transform] Checking value/gradient relation (mode={mode}, p={kernel_power})...")
     radius = 0.5
     accuracy = 1e-3
@@ -362,6 +365,7 @@ def run_sup_transform_gradient_relation(mode: str = "convex", kernel_power: int 
 
 
 def run_inf_transform_value_and_gradients(mode: str = "convex", kernel_power: int = 2, cache_gradients: bool = False):
+    """Verify inf_transform optimizer/value and gradient relation mirrors forward at X*."""
     print(f"\n[Inf Transform] Checking value/gradient relation (mode={mode}, p={kernel_power})...")
     radius = 0.5
     accuracy = 1e-3
@@ -404,6 +408,7 @@ def run_inf_transform_value_and_gradients(mode: str = "convex", kernel_power: in
 
 
 def run_high_dim_pnorm_forward_checks():
+    """Regression for higher-dimensional p-norm kernels (p=4)."""
     print("\n[High-D] Testing forward/gradients with p=4 kernel...")
     X = torch.tensor(
         [
@@ -424,6 +429,7 @@ def run_high_dim_pnorm_forward_checks():
 
 
 def run_concave_forward_checks():
+    """Exercise concave mode with p=4 kernel."""
     print("\n[Concave] Testing forward/gradients with p=4 kernel...")
     X = torch.tensor(
         [
@@ -443,6 +449,7 @@ def run_concave_forward_checks():
 
 
 def run_hard_no_snap_choice_checks(mode: str = "convex"):
+    """Ensure hard-mode without snapping uses continuous kernel scores."""
     print(f"\n[No Snap] Verifying hard-mode choices ({mode}) use continuous kernel evaluations...")
     radius = 1.0
     accuracy = 0.3
@@ -480,6 +487,7 @@ def run_hard_no_snap_choice_checks(mode: str = "convex"):
 
 
 def run_cached_gradient_regression():
+    """Regression for cached-derivative mode on forward/sup/inf/coarse search."""
     print("\n[Cached Gradients] Verifying cached derivative mode...")
     X = torch.tensor([[-0.45], [0.35]], dtype=torch.float32)
     run_forward_and_gradient_check(
@@ -505,6 +513,7 @@ def run_cached_gradient_regression():
 
 
 def verify_coarse_transform_matches_exact():
+    """Coarse-to-fine search should match baseline forward/transform outputs."""
     print("\n[Coarse Search] Verifying coarse-to-fine transform matches baseline...")
     torch.manual_seed(1)
     radius = 1.0
@@ -544,6 +553,7 @@ def verify_coarse_transform_matches_exact():
 
 
 def validate_coarse_search_random_configs():
+    """Stress coarse search across random configs against full-grid baselines."""
     print("\n[Coarse Search] Stress-testing multiple configs...")
     torch.manual_seed(123)
     configs = [
@@ -590,6 +600,7 @@ def validate_coarse_search_random_configs():
             raise AssertionError(f"Coarse inf mismatch for cfg={cfg}")
 
 def run_coarse_transform_batch_equivalence():
+    """Vectorized coarse transform path should equal scalar full search."""
     print("\n[Coarse Search] Batch inf_transform matches full search...")
     base = build_model(num_dims=1, radius=2.0, accuracy=0.25, mode="concave")
     coarse = build_model(

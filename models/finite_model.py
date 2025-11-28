@@ -1,9 +1,12 @@
+"""FiniteModel-related helpers and custom OT solvers built on FiniteModel/OT."""
+
+import logging
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from optimal_transport.ot import OT
-import logging
-import math
 from tools.feedback import logger
 from models.helpers import FixedFirstIntercept
 
@@ -61,10 +64,12 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         self.state = self._adam.state
 
     def zero_grad(self):
+        """Zero gradients for both Adam and SGD phases."""
         self._adam.zero_grad()
         self._sgd.zero_grad()
 
     def state_dict(self):
+        """Return optimizer state for checkpointing across warm-to-steady transition."""
         return {
             "adam_state": self._adam.state_dict(),
             "sgd_state": self._sgd.state_dict(),
@@ -79,6 +84,7 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         }
 
     def load_state_dict(self, state_dict):
+        """Restore optimizer state and adjust current phase accordingly."""
         self._adam.load_state_dict(state_dict["adam_state"])
         self._sgd.load_state_dict(state_dict["sgd_state"])
         self.warm_lr = state_dict["warm_lr"]
@@ -93,12 +99,14 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         self.param_groups = self._adam.param_groups if self._use_warm_lr else self._sgd.param_groups
 
     def _set_lr(self, lr):
+        """Apply same learning rate to both internal optimizers."""
         for group in self._adam.param_groups:
             group["lr"] = lr
         for group in self._sgd.param_groups:
             group["lr"] = lr
 
     def step(self, closure=None, grad_norm: float | None = None):
+        """Perform a parameter update and switch to SGD once warmup criteria are met."""
         if self._use_warm_lr:
             trigger = False
             if grad_norm is not None and grad_norm >= self.grad_threshold:
@@ -208,46 +216,34 @@ class FCOTSeparable(OT):
         **model_kwargs
     ):
         """
-        Factory method for creating FCOTSeparable with specified grid resolution.
-        
+        Factory for building a grid-based separable FCOT solver.
+
         Parameters
         ----------
         dim : int
-            Input/output dimension
+            Input/output dimensionality.
         radius : float
-            Domain radius (X, Y ⊆ [-R, R]^d)
+            Bound on coordinate magnitude (domain = [-radius, radius]^d).
         n_params : int
-            Total number of intercept parameters (must equal dim × |Y_0|)
+            Total number of intercepts (must be divisible by `dim`).
         x_accuracy : float
-            Spacing for the X grid (controls X discretization used in transforms)
+            Spacing for the X grid used in infimal convolution transforms.
         kernel_1d : callable
-            1D kernel c_d(x, y) where x, y are scalars (or 1D tensors)
+            1D kernel function `c_d(x, y)` describing separable costs.
         inverse_kx : callable
-            Inverse gradient: (x, p) ↦ y solving ∇_x c(x,y) = p
-        outer_lr : float
-            Learning rate for outer optimization (Adam on intercepts)
-        betas : tuple
-            Beta parameters for Adam optimizer
-        device : str
-            Device to place model on
-        temp : float
-            Temperature for soft max/min in forward pass
-        epsilon : float
-            Boundary margin for clamping inputs to valid domain
+            Analytic inverse gradient mapping ∇_x c(x, y) → y used in Monge map.
         cache_gradients : bool
-            If True, precompute ∂k/∂x and ∂k/∂y on the grid to speed up hard selections
+            Whether to precompute derivatives on the grid for faster transforms.
+        Other params : See FCOTSeparable.__init__ for further hyperparameters.
         
         Returns
         -------
         FCOTSeparable
-            Configured solver instance
-            
+            Instantiated solver configured for the requested grid resolution.
+
         Notes
         -----
-        Parameter count:
-            n_params = dim × |Y_0|
-        
-        Each dimension has n_params / dim intercept parameters (y positions fixed on Y-grid).
+        Parameter budget satisfies `n_params = dim × |Y_0|`.
         """
         if n_params % dim != 0:
             raise ValueError(f"n_params={n_params} must be divisible by dim={dim}.")
@@ -325,6 +321,28 @@ class FCOTSeparable(OT):
         reactivate_eps: float = 1e-2,
         full_refresh_every: int | None = None,
     ):
+        """
+        Initialize separable FCOT solver over a finite grid.
+
+        Parameters
+        ----------
+        input_dim : int
+            Dimensionality of source/target space.
+        model : nn.Module
+            FiniteSeparableModel providing u/u^c transforms on a grid.
+        inverse_kx : callable
+            Mapping (x, ∇u(x)) → y used to evaluate transport map.
+        outer_lr : float
+            Learning rate for the outer Adam optimizer.
+        lr : float | None
+            Deprecated alias for `outer_lr`.
+        betas : Tuple[float, float]
+            Adam beta coefficients.
+        temp_min, temp_max, temp_warmup_iters : optional float
+            Controls adaptive temperature scheduling for discrete transforms.
+        reactivate_every, reactivate_eps, full_refresh_every : int/float
+            Hooks that keep inactive intercepts viable by reactivating/refreshing them.
+        """
         # Handle deprecated lr parameter before delegating to OT.__init__
         if lr is not None:
             logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
@@ -396,8 +414,9 @@ class FCOTSeparable(OT):
 
     def _dual_objective(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
         """
-        Compute dual objective D = E_x[u(X)] + E_y[u^c(Y)] on the given batch.
-        No inner optimization is required for the separable model.
+        Evaluate dual objective D = E_x[u(X)] + E_y[u^c(Y)] on a minibatch.
+
+        Returns (D, u_mean, uc_mean, converged) for reporting.
         """
         _, u_vals = self.model.forward(x_batch, selection_mode="soft")
         u_mean = u_vals.mean()
@@ -410,7 +429,10 @@ class FCOTSeparable(OT):
 
     def step(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
         """
-        Single gradient-ascent step on the dual objective.
+        Perform a gradient step on the separable dual objective with diagnostics.
+
+        Returns dict with dual objective, mean potentials, convergence status, gradient norm,
+        and intercept activity statistics for logging.
         """
         self._maybe_update_temperature()
         self.optimizer.zero_grad()
@@ -461,6 +483,15 @@ class FCOTSeparable(OT):
         }
 
     def _maybe_reactivate(self, x_batch):
+        """
+        Periodically bump inactive intercepts using the kernel transform to avoid stagnation.
+
+        Guidelines:
+            - Enabled by setting reactivate_every>0 at init.
+            - Uses gradient activity below _grad_activity_eps to decide "inactive".
+            - Lifts inactive intercepts toward a small margin (eps) above the
+              current kernel lower envelope for the given minibatch.
+        """
         if self._reactivate_every is None:
             return
         if self._step_count % self._reactivate_every != 0:
@@ -522,6 +553,13 @@ class FCOTSeparable(OT):
             )
 
     def _maybe_full_refresh(self):
+        """
+        Periodically refresh intercepts/optimizer momentum and inject jitter.
+
+        Enabled when full_refresh_every>0; calls refresh_intercepts_via_transform,
+        resets optimizer momentum on the intercept parameter, and adds tiny noise
+        to break ties.
+        """
         if self._full_refresh_every is None:
             return
         if self._step_count % self._full_refresh_every != 0:
@@ -606,6 +644,7 @@ class FCOTSeparable(OT):
 
 
     def _maybe_update_temperature(self):
+        """Cosine warmup from temp_max → temp_min over temp_warmup_iters steps (if set)."""
         if self._temp_min is None or self._temp_max is None:
             return
         if self._temp_warmup_iters is None or self._temp_warmup_iters <= 0:
@@ -619,7 +658,7 @@ class FCOTSeparable(OT):
 
     def save(self, address, iters_done):
         """
-        Save model checkpoint for caching/resume consistency with other OT subclasses.
+        Save model + optimizer checkpoint to disk for caching/resume.
         """
         torch.save(
             {
@@ -634,7 +673,7 @@ class FCOTSeparable(OT):
 
     def load(self, address):
         """
-        Load checkpoint saved via save and return the number of completed iterations.
+        Load saved checkpoint and return iterations already completed.
         """
         checkpoint = torch.load(address, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -650,13 +689,10 @@ class FCOTSeparable(OT):
         snap_to_grid: bool = True,
     ):
         """
-        Transport points from X to Y using the Monge map.
-        
-        The Monge map is the c-gradient of u:
-            T(x) = ∇_x^c u(x) = inverse_kx(x, ∇u(x))
-        
-        For separable models with grid-based representation and kernel_derivative,
-        we use envelope theorem for efficient gradient computation.
+        Transport samples `X` to `Y` via the c-gradient (Monge map).
+
+        The method differentiates through the softmax-infimal transforms to obtain
+        ∇u(x) and then applies the provided `inverse_kx`.
         """
         X = X.to(self.device)
         X.requires_grad_(True)
@@ -698,10 +734,9 @@ class FCOTSeparable(OT):
         log_level: str | None = None,
     ):
         """
-        Fit the model by maximizing the dual objective.
-        
-        Note: inner_steps is ignored for separable model since transforms
-        are computed exactly on grids (no numerical optimization).
+        Fit procedure delegating logging/optimization to the OT base class.
+
+        inner_steps is always forced to 0 because separable transforms are exact.
         """
         if inner_steps is not None and inner_steps != 0:
             logger.warning(
@@ -980,6 +1015,15 @@ class FiniteSeparableModel(nn.Module):
         Compute per-dimension contribution:
             convex → max_i k(x_d, y_i) - b_i^d
             concave → min_i k(x_d, y_i) - b_i^d
+
+        Notes
+        -----
+        - snap_to_grid=True (hard mode) rounds x_d to the nearest X_grid point before
+          scoring; False evaluates the continuous kernel directly.
+        - In hard mode with gradients, a straight-through update is used:
+          if cache_gradients=True and precomputed dx exist, it interpolates them;
+          otherwise it backpropagates through per-sample autograd calls. Either way,
+          the forward choice stays discrete and gradients are approximate.
         """
         x_vals = X[:, along]
         x_vals_clamped = self.project(x_vals)
@@ -1029,6 +1073,23 @@ class FiniteSeparableModel(nn.Module):
         selection_mode: str = "soft",
         snap_to_grid: bool = True,
     ):
+        """
+        Evaluate f(X) and argmax/argmin selections on the separable grid.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Input batch of shape (num_samples, num_dims).
+        selection_mode : {"soft", "hard", "ste"}
+            Soft/Hard/stochastic selection; "hard" uses straight-through gradients.
+        snap_to_grid : bool
+            If True, x-values are rounded to the X grid before scoring (only relevant in "hard").
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            (choice, f_x) with per-dimension choices and summed scores.
+        """
         args = []
         values = []
         for dim in range(self.num_dims):
@@ -1049,6 +1110,24 @@ class FiniteSeparableModel(nn.Module):
         return self._transform_core(Z, maximize=False)
 
     def _transform_core(self, Z: torch.Tensor, maximize: bool = True):
+        """
+        Batch transform across dimensions with optional coarse-to-fine search.
+
+        Parameters
+        ----------
+        Z : torch.Tensor
+            Targets of shape (num_samples, num_dims).
+        maximize : bool
+            True for sup-transform, False for inf-transform.
+
+        Notes
+        -----
+        If coarse_x_factor/coarse_top_k/coarse_window were provided at init,
+        each per-dimension transform first scores a subsampled X grid, seeds
+        the best few candidates, then refines within the configured window;
+        otherwise it searches the full grid. Setting coarse_x_factor<=1
+        disables the coarse path.
+        """
         num_samples, num_dims = Z.shape
         device = Z.device
         dtype = Z.dtype
@@ -1066,6 +1145,13 @@ class FiniteSeparableModel(nn.Module):
     def _per_dimension_transform_batch(self, z_vals: torch.Tensor, along: int, maximize: bool):
         """
         Vectorized per-dimension transform for an entire batch of z values.
+
+        Gradients:
+            If z_vals.requires_grad, the method adds a straight-through term:
+            - with cache_gradients=True and precomputed kernel_dy, it interpolates
+              cached ∂k/∂y at the chosen (x*, z) pairs;
+            - otherwise it falls back to per-sample autograd on the continuous kernel.
+            Forward choices remain discrete; gradients are approximate.
         """
         device = z_vals.device
         dtype = z_vals.dtype
@@ -1238,6 +1324,34 @@ class FiniteModel(nn.Module):
         default_intercept: float = 0.0,
         sorted_model: bool = False,
     ):
+        """
+        Initialize a finite convex/concave model over a discrete candidate set.
+
+        Parameters
+        ----------
+        num_candidates : int
+            Number of non-default candidate points (columns in Y_rest).
+        num_dims : int
+            Dimensionality of each candidate/vector.
+        kernel : callable
+            Pairwise kernel k(x, y) used to score candidates.
+        mode : {"convex", "concave"}
+            Whether to take max or min over candidates.
+        temp : float
+            Softmax temperature used in soft/ste selection.
+        is_y_parameter : bool
+            If True, Y is trainable; otherwise treated as a buffer.
+        y_min, y_max : float | None
+            Optional bounds; when provided, Y is rescaled/clamped into [y_min, y_max].
+        original_dist_to_bounds : float
+            Slack added when only one bound is set to avoid collapsing candidates.
+        is_there_default : bool
+            Include an extra default option with its own intercept.
+        default_intercept : float
+            Intercept value for the default option.
+        sorted_model : bool
+            If True, enforce nondecreasing coordinates per candidate via softplus increments.
+        """
         super().__init__()
         assert mode in ("convex", "concave")
 
@@ -1460,11 +1574,22 @@ class FiniteModel(nn.Module):
                 - X_opt: Optimized positions (detached)
                 - values: Transform values (with gradients)
                 - converged: Boolean indicating if optimization converged
-                  
+
         Convergence Detection:
             - LBFGS: Always considered converged (uses internal line search)
             - Adam/GD: Converged if |loss[i] - loss[i-1]| < tol for any step i
             - If max steps reached without meeting tolerance, converged=False
+
+        Warm starts:
+            If sample_idx is provided, per-sample warm-starts are stored and
+            reused across calls (and grown dynamically as new indices appear);
+            otherwise Z is used as the initialization.
+
+        Optimizer controls:
+            `optimizer` selects between "lbfgs" and first-order updates; `lam`
+            is the implicit-diff regularizer; `patience` gates early stopping
+            for first-order modes. The returned `converged` flag reflects these
+            criteria only.
         """
         num_samples, num_dims = Z.shape
         device = Z.device

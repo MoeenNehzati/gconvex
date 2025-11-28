@@ -1,15 +1,18 @@
-import torch
-from typing import Any, Dict
+"""Base classes and utilities for optimal transport solvers."""
+
 import logging
 import os
+from typing import Any
+
+import torch
 from config import WRITING_ROOT
-from tools.utils import hash_dict
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn, TimeElapsedColumn
-from tools.feedback import logger, make_status_panel, LiveOrJupyter
-import tools.feedback as feedback
+from tools.feedback import LiveOrJupyter, logger, make_status_panel
+from tools.utils import hash_dict
 
 
 class OT:
+    """Abstract optimal transport solver providing common training utilities."""
     def __init__(self,
                  outer_lr: float | None = None,
                  inner_lr: float | None = None) -> None:
@@ -50,28 +53,65 @@ class OT:
         return OT(outer_lr=outer_lr, inner_lr=inner_lr, *args, **kwargs)
 
     def step(self, x_batch, y_batch, *args, **kwargs) -> Any:
-        # Base placeholder: subclasses override. Accepts variable args for compatibility.
+        """Placeholder training step that subclasses override.
+
+        Parameters
+        ----------
+        x_batch : torch.Tensor
+            Batch of source samples.
+        y_batch : torch.Tensor
+            Batch of target samples.
+        *args, **kwargs :
+            Additional arguments (used by subclasses such as FCOT).
+
+        Returns
+        -------
+        Any
+            Placeholder stats dictionary expected by _fit.
+        """
         return {}
 
     def _dual_objective(self, *args, **kwargs):
-        # Subclasses (e.g., FCOT) implement this. Base class does not.
+        """Compute dual objective for the current solver state.
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised for the base class; concrete OT subclasses implement this.
+        """
         raise NotImplementedError("_dual_objective is not implemented for base OT.")
     
     def transport_X_to_Y(self, X):
-       return X
+        """Identity mapping for base OT (no transport defined)."""
+        return X
     
     def debug_losses(self, X, Y):
+        """Return diagnostic loss information for the current state."""
         return []
     
     def get_hash(self, X, Y):
-        # returns a hash associated with the model specification and data
+        """Compute deterministic hash for model+data configuration.
+
+        Parameters
+        ----------
+        X, Y : torch.Tensor
+            Training datasets used to seed the hash.
+        """
         info = {'X': X,
                 'Y': Y,
                 **self.__dict__}
         return hash_dict(info)
 
     def get_address(self, X, Y, dir=WRITING_ROOT):
-        # returns address associated with the model specification and data
+        """Return checkpoint filepath based on model/data hash and metadata.
+
+        Parameters
+        ----------
+        X, Y : torch.Tensor
+            Reference datasets used to compute the hash.
+        dir : str
+            Directory to place the checkpoint file.
+        """
         h = self.get_hash(X, Y)
         classname = self.__class__.__name__
 
@@ -106,23 +146,26 @@ class OT:
         return os.path.join(dir, filename)
 
     def save(self, address, iters_done):
-        # saves the models and itersdone to address with torch.save
+        """Persist solver state to disk (overridden by subclasses)."""
         return None
 
     def load(self, address):
-        # loads the models and itersdone from address with torch.load and returns iters_done
+        """Restore saved solver state (returns iterations done)."""
         return 0
     
     def _get_active_inner_steps(self, inner_steps):
         """
         Helper to determine which inner_steps value to use.
         
-        Args:
-            inner_steps: Value passed to fit/inner optimization.
-                        If None, falls back to self.inner_steps if available.
+        Parameters
+        ----------
+        inner_steps : int | None
+            Hint provided by the caller. Fallback defaults to `self.inner_steps`.
         
-        Returns:
-            int: The active inner_steps value to use.
+        Returns
+        -------
+        int
+            Inner loop iterations that should be executed.
         """
         if inner_steps is not None:
             return inner_steps
@@ -566,6 +609,10 @@ class OT:
                          Ignored if warmup_until_converged=True.
             warmup_until_converged: If True, run warm-up until all points converge (adaptive).
                                    Good for ensuring high-quality warm starts before training.
+        Returns
+        -------
+        dict
+            Logs collected during training (dual objectives, convergence flags, etc.).
         """
 
         # --------------------------------------------------------

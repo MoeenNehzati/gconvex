@@ -1,12 +1,16 @@
-import torch
-import sys, importlib
-import os
+"""Utilities for training monitoring, selection heuristics, serialization, and constraints."""
+
+from __future__ import annotations
+
 import hashlib
+import importlib
 import json
-import hashlib
-import torch
-import numpy as np
+import os
+import sys
 from typing import Any, Dict, Tuple
+
+import numpy as np
+import torch
 
 
 # ============================================================
@@ -14,6 +18,7 @@ from typing import Any, Dict, Tuple
 # ============================================================
 
 def forward_hook(module: torch.nn.Module, input, output):
+    """Callback that raises if the module emits NaNs in weights/values."""
     if isinstance(output, tuple) and len(output) == 2:
         weights, values = output
         if torch.isnan(weights).any():
@@ -23,13 +28,14 @@ def forward_hook(module: torch.nn.Module, input, output):
 
 
 def grad_hook(grad):
+    """Gradient hook that validates gradients remain finite."""
     if torch.isnan(grad).any():
         raise RuntimeError("[NaN] in gradient")
     return grad
 
 
 def attach_nan_hooks(model: torch.nn.Module):
-    """Attach simple forward/backward NaN detectors to all leaf modules."""
+    """Attach forward/backward NaN detectors to a model's leaf modules."""
     for _, module in model.named_modules():
         if len(list(module.children())) == 0:
             module.register_forward_hook(forward_hook)
@@ -386,14 +392,28 @@ def is_in_jupyter_notebook():
 IN_JUPYTER = is_in_jupyter_notebook()
 
 def linear_kernel(X,Y, dim=1):
-        return ((X * Y)).sum(dim=dim)
+    """Compute dot-product kernel along specified dimension."""
+    return ((X * Y)).sum(dim=dim)
 
 def quadratic_cost(choice, dim=1):
+    """Return half the squared-norm (quadratic) cost for choices."""
     return (choice**2).sum(dim=dim)/2
 
 def loader(paths=None, root=None):
-    """Dynamically load the optim module and import its contents into the main module. Then loads files of paths, if paths is None, the root directory is searched for all files ending with sample.pt and final.pt and these are loaded. If root is None, WRITING_ROOT from config.py is used as root.
-    The function returns a dictionary with keys being the directory names and values being tuples of (sample, [models])
+    """
+    Load saved mechanism artifacts (samples and finals) for inspection.
+
+    Parameters
+    ----------
+    paths : Sequence[str] | None
+        Specific files to load. If None, the function scans `root` for artifacts.
+    root : str | None
+        Directory to scan. Defaults to `config.WRITING_ROOT` when unspecified.
+
+    Returns
+    -------
+    Dict[str, Tuple[torch.Tensor, list]]
+        Maps each directory to a tuple with the sample tensor and a list of final models.
     """
     names = {}
     if paths is None:
@@ -430,7 +450,14 @@ def loader(paths=None, root=None):
 
 
 def generate_dir_and_name(prefix, *args, **kwargs):
-    #generates a directory name starting with the prefix and involving the information in args and kwargs
+    """
+    Create a structured directory path by combining prefix with args/kwargs metadata.
+
+    Args:
+        prefix: Base directory name prefix.
+        *args: Positional metadata (classes/functions or strings).
+        **kwargs: Named metadata that will appear as `key:value` segments.
+    """
     dir = prefix
     for arg in args:
         if isinstance(arg, str):
@@ -448,29 +475,39 @@ def generate_dir_and_name(prefix, *args, **kwargs):
     return dir
 
 def IR_constraint(mechanism, mechanism_data, kappa = 100):
-    #Constraints are supposed to be positive
-    #returns the indirect utilities
+    """Individual rationality constraint: returns indirect utilities `v`."""
     v = mechanism_data["v"]
     return v
-    
+   
 def model_min_constraint(mechanism, mechanism_data, kappa=100):
-    #Constraints are supposed to be positive
-    #returns the distance between Y and its supposed minimum
+    """Enforce lower bounds on remaining `Y` intercepts."""
     if mechanism.y_min is None:
-        # No lower bound specified; treat as no constraint.
         return torch.zeros_like(mechanism.Y_rest)
     return mechanism.Y_rest - mechanism.y_min
-    
+   
 def model_max_constraint(mechanism, mechanism_data, kappa=100):
-    #Constraints are supposed to be positive
-    #returns the distance between Y and its supposed minimum
+    """Enforce upper bounds on remaining `Y` intercepts."""
     if mechanism.y_max is None:
-        # No upper bound specified; treat as no constraint.
         return torch.zeros_like(mechanism.Y_rest)
     return mechanism.y_max - mechanism.Y_rest
 
 @torch.no_grad()
 def greedy_neg_order(R: torch.Tensor, k: int | None = None):
+    """
+    Heuristic ordering that brings the most negative correlations to the top-left.
+
+    Parameters
+    ----------
+    R : torch.Tensor
+        Square matrix (n, n) of pairwise scores/correlations.
+    k : int | None
+        Size of the leading block to optimize (defaults to max(n//5,2)).
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Permuted matrix and the permutation vector.
+    """
     n = R.size(0)
     if k is None: k = max(n // 5, 2)
 
@@ -505,26 +542,29 @@ def greedy_neg_order(R: torch.Tensor, k: int | None = None):
     return R_perm, perm
 
 def Lpp(X, Y, p=2):
+    """Compute the L_p^p cost (sum over dimensions) between X and Y."""
     diff = (X - Y).abs()
     return (diff ** p).sum(dim=-1) / p
 
 
 def inverse_Lppx(X, Z, p=2):
-    # X: (..., d), Z = L_p^p/∂x at (X, Y)
-    # Returns Y solving ∇_x L_p^p(X, Y) = Z
+    """Given grad w.r.t. x of L_p^p(X, Y), return the associated Y."""
     assert p > 1
     d = torch.sign(Z) * Z.abs()**(1.0 / (p - 1))
     return X - d
 
 def nLpp(X, Y, p=2):
+    """Negative L_p^p cost (useful for concave counterparts)."""
     return -Lpp(X, Y, p=p)
 
 def inverse_nLppx(X, Z, p=2):
+    """Inverse gradient of the negative L_p^p cost."""
     assert p > 1
     d = torch.sign(Z) * Z.abs()**(1/(p - 1))
     return X + d
 
 def Lpp_1d(x, y, p=2):
+    """1D version of L_p^p between scalars x and y."""
     diff = (x - y).abs()
     return diff ** p / p
 
@@ -542,38 +582,46 @@ def L55_1d(x, y):
 
 
 def L22(X, Y):
+    """Convenience wrapper for squared Euclidean cost L_2^2."""
     return Lpp(X, Y, p=2)
 
 def L33(X, Y):
+    """L_3^3 cost."""
     return Lpp(X, Y, p=3)
 
 def L44(X, Y):
+    """L_4^4 cost."""
     return Lpp(X, Y, p=4)
 
 def L55(X, Y):
+    """L_5^5 cost."""
     return Lpp(X, Y, p=5)
 
 def inverse_L22x(X, Z):
+    """Inverse gradient of L_2^2."""
     return inverse_Lppx(X, Z, p=2)
 
 def inverse_L33x(X, Z):
+    """Inverse gradient of L_3^3."""
     return inverse_Lppx(X, Z, p=3)
 
 def inverse_L44x(X, Z):
+    """Inverse gradient of L_4^4."""
     return inverse_Lppx(X, Z, p=4)
 
 def inverse_L55x(X, Z):
+    """Inverse gradient of L_5^5."""
     return inverse_Lppx(X, Z, p=5)
 
 def project_to_box(x, R):
-    """
-    Projects x onto the box [-R, R] elementwise.
-    """
+    """Project tensor `x` componentwise onto the [-R, R] box."""
     return x.clamp(-R, R)
 
 
 def nL22_1d(x, y):
+    """Negative squared distance in 1D."""
     return -Lpp_1d(x, y, p=2)
 
 def inverse_nL22x(X, Z):
+    """Inverse gradient for negative L_2^2 in 1D."""
     return inverse_nLppx(X, Z, p=2)

@@ -1,8 +1,10 @@
+"""Separable optimal transport solver with custom optimizer heuristics."""
+
+import math
+
 import torch
 from torch import nn
 from optimal_transport.ot import OT
-import logging
-import math
 from models import FiniteSeparableModel
 from tools.feedback import logger
 
@@ -60,10 +62,12 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         self.state = self._adam.state
 
     def zero_grad(self):
+        """Reset gradients for both warm-up and steady optimizers."""
         self._adam.zero_grad()
         self._sgd.zero_grad()
 
     def state_dict(self):
+        """Serialize optimizer state for checkpointing."""
         return {
             "adam_state": self._adam.state_dict(),
             "sgd_state": self._sgd.state_dict(),
@@ -78,6 +82,7 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         }
 
     def load_state_dict(self, state_dict):
+        """Restore optimizer state and resume appropriate learning phase."""
         self._adam.load_state_dict(state_dict["adam_state"])
         self._sgd.load_state_dict(state_dict["sgd_state"])
         self.warm_lr = state_dict["warm_lr"]
@@ -92,12 +97,14 @@ class TwoStageOptimizer(torch.optim.Optimizer):
         self.param_groups = self._adam.param_groups if self._use_warm_lr else self._sgd.param_groups
 
     def _set_lr(self, lr):
+        """Apply the same learning rate to both optimizers."""
         for group in self._adam.param_groups:
             group["lr"] = lr
         for group in self._sgd.param_groups:
             group["lr"] = lr
 
     def step(self, closure=None, grad_norm: float | None = None):
+        """Perform a parameter update, switching optimizers when criteria met using grad norm."""
         if self._use_warm_lr:
             trigger = False
             if grad_norm is not None and grad_norm >= self.grad_threshold:
@@ -324,6 +331,36 @@ class FCOTSeparable(OT):
         reactivate_eps: float = 1e-2,
         full_refresh_every: int | None = None,
     ):
+        """
+        Initialize the separable FCOT solver with finite-grid model and optimizer.
+
+        Parameters
+        ----------
+        input_dim : int
+            Dimensionality of each sample in X/Y.
+        model : torch.nn.Module
+            FiniteSeparableModel instance representing u/b potentials.
+        inverse_kx : callable
+            Function mapping (x, ∇u(x)) ↦ y for the separable cost.
+        outer_lr : float
+            Learning rate for the outer Adam optimizer.
+        lr : float | None
+            Deprecated alias for `outer_lr` kept for backward compatibility.
+        betas : tuple
+            Beta parameters for the outer optimizer.
+        device : str
+            Device string for torch tensors.
+        warmup_lr : float | None
+            Deprecated warm-up learning rate (ignored with warning).
+        warmup_grad_threshold etc. :
+            Legacy arguments ignored for deterministic separable transforms.
+        reactivate_every : int | None
+            Interval (in outer steps) to attempt reactivating inactive intercepts.
+        reactivate_eps : float
+            Margin used when reactivating intercepts.
+        full_refresh_every : int | None
+            Interval to perform full intercept refresh and jitter.
+        """
         # Handle deprecated lr parameter before delegating to OT.__init__
         if lr is not None:
             logger.warning("[DEPRECATION] 'lr' argument is deprecated; use 'outer_lr' instead.")
@@ -409,15 +446,18 @@ class FCOTSeparable(OT):
 
     def step(self, x_batch, y_batch, idx_y=None, active_inner_steps=None):
         """
-        Single gradient-ascent step on the dual objective.
+        Perform one gradient step on the separable dual objective and update intercepts.
+
+        Returns a dict summarizing current dual objective, mean potentials,
+        convergence status, gradient norm, and intercept activity statistics.
         """
         self._maybe_update_temperature()
         self.optimizer.zero_grad()
         D, u_mean, uc_mean, converged = self._dual_objective(
             x_batch, y_batch, idx_y, active_inner_steps
         )
-        #TODO take a look at this later and think about it
-        (-10*D).backward()
+        # Scale by negative constant to convert maximization into stable gradient descent.
+        (-10 * D).backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
         step_kwargs = {}
@@ -458,6 +498,7 @@ class FCOTSeparable(OT):
         }
 
     def _maybe_reactivate(self, x_batch):
+        """Refresh intercepts whose gradients have gone to zero to avoid dead regions."""
         if self._reactivate_every is None:
             return
         if self._step_count % self._reactivate_every != 0:
@@ -475,6 +516,7 @@ class FCOTSeparable(OT):
         full_grad = torch.zeros_like(intercepts, device=theta_grad.device, dtype=theta_grad.dtype)
         full_grad[1:, :] = theta_grad.detach()
 
+        # Identify intercepts whose gradient magnitude has dropped below threshold
         inactive_mask = full_grad.abs() <= self._grad_activity_eps
         if inactive_mask.sum().item() == 0:
             return
@@ -503,6 +545,7 @@ class FCOTSeparable(OT):
                 scores = kernel_vals - column.unsqueeze(0)
                 best_scores = scores.min(dim=1).values
                 target = (kernel_vals - best_scores.unsqueeze(1) + eps).min(dim=0).values
+                # Increase rows that are inactive by comparing to noisy target
                 updated_column = torch.where(mask_dim, torch.maximum(column, target), column)
                 if torch.any(updated_column != column):
                     # Write back through parameterization if available
@@ -521,6 +564,7 @@ class FCOTSeparable(OT):
             )
 
     def _maybe_full_refresh(self):
+        """Perform a complete intercept refresh/jitter routine at regular intervals."""
         if self._full_refresh_every is None:
             return
         if self._step_count % self._full_refresh_every != 0:
@@ -648,7 +692,21 @@ class FCOTSeparable(OT):
         snap_to_grid: bool = True,
     ):
         """
-        Computes the finite-separable Monge map with optional snapping control.
+        Computes the finite-separable Monge map using analytical transforms.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Source samples to transport.
+        selection_mode : str
+            How to select grid points ("soft" vs "hard").
+        snap_to_grid : bool
+            Whether to snap to the grid during forward pass.
+
+        Returns
+        -------
+        torch.Tensor
+            Transported target locations.
         """
         X = X.to(self.device)
         X.requires_grad_(True)
@@ -680,6 +738,11 @@ class FCOTSeparable(OT):
         
         Note: inner_steps is ignored for separable model since transforms
         are computed exactly on grids (no numerical optimization).
+        
+        Returns
+        -------
+        dict
+            Logs collected by the parent `_fit`.
         """
         if inner_steps is not None and inner_steps != 0:
             logger.warning(

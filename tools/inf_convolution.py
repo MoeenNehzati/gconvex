@@ -128,8 +128,8 @@ class InfConvolution(Function):
         if len(params) == 0:
             params = tuple(f_net.parameters())
         
-        # Create detached parameter dict for functional_call
-        # This prevents gradient tracking through parameters during optimization
+        # Create detached parameter dict for functional_call so that the optimizer
+        # only updates `x_var` and not the network parameters.
         params_dict = {name: p.detach() for name, p in f_net.named_parameters()}
         
         x_var = x_init.clone().detach().requires_grad_(True)
@@ -145,9 +145,9 @@ class InfConvolution(Function):
                     if x_var.grad is not None:
                         x_var.grad.zero_()
                     
-                    # Compute objective using detached parameters (no param gradients)
-                    k_val = K(x_var, y)
-                    f_val = functional_call(f_net, params_dict, (x_var,))
+                # Compute objective using detached parameters (no param gradients)
+                k_val = K(x_var, y)
+                f_val = functional_call(f_net, params_dict, (x_var,))
                     obj = k_val - f_val + 0.5 * lam * x_var.pow(2).sum()
                     
                     # Compute gradients wrt x only (params are detached)
@@ -176,8 +176,8 @@ class InfConvolution(Function):
                 for step in range(solver_steps):
                     optim_obj.zero_grad()
                     
-                    # Compute objective using detached parameters (no param gradients)
-                    k_val = K(x_var, y)
+                # Compute objective using detached parameters (no param gradients)
+                k_val = K(x_var, y)
                     f_val = functional_call(f_net, params_dict, (x_var,))
                     obj = k_val - f_val + 0.5 * lam * x_var.pow(2).sum()
                     

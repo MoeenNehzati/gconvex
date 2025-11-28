@@ -1,3 +1,5 @@
+"""Simple baseline runner comparing OT solvers on DGPS-generated Gaussian pairs."""
+
 from optimal_transport.ot_icnn_map import ICNNOT
 from optimal_transport.ot_gnot_map import GNOTOT
 from optimal_transport.ot_fc_map import FCOT
@@ -13,7 +15,7 @@ from tools.feedback import set_log_level
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--data_path', type=str, default=None, help='torch save file containing x and y arrays or the shapes')    
-    p.add_argument('--generate', '-g', action='store_true', help='Generate gaussian paired data via tools.dgps')
+    p.add_argument('--generate', '-g', action='store_true', help='Generate gaussian paired data via tools.dgps (expects params in the file).')
     p.add_argument('--out', type=str, default=WRITING_ROOT, help='output directory')
     p.add_argument('--iters', type=int, default=gauss_params.niters, help='training steps for optimal_transport (small default)')
     p.add_argument('--nparams', type=int, default=gauss_params.model_size, help='number of parameters')
@@ -45,6 +47,7 @@ if __name__ == '__main__':
         else:
             x, y = specification["x"], specification["y"]
     else:
+        # Use default DGPS params when no data path provided
         x, y, _ = generate_gaussian_pairs(**gauss_params.params)
     d = x.shape[1]
     
@@ -54,6 +57,7 @@ if __name__ == '__main__':
     
     # gnotot = GNOTOT.initialize_right_architecture(d, nparams, T_lr=lr, D_lr=lr, cost_fn=euclidean_squared_cost, batch_size=batch_size)
     # losses_gnot = gnotot.fit(x, y, iters=iters, inner_steps=inner_steps, force_retrain=force_retrain)
+    # FCOT is used as the active baseline in this script
     fcot = FCOT.initialize_right_architecture(d,
                                               nparams,
                                               cost=L22,
@@ -69,4 +73,7 @@ if __name__ == '__main__':
     
     visualize_transport(x, y, fcot)
 
-# python -m scripts.compare_optimal_transport
+# Expected --data_path contents:
+#   - if --generate: a dict with "params" for generate_gaussian_pairs
+#   - else: a dict with "x" and "y" tensors to load directly
+# Artifacts: transport visualization written under --out (WRITING_ROOT by default).

@@ -1,3 +1,5 @@
+"""Auxiliary modules for intercept parameterizations used in FiniteModel."""
+
 import torch
 from torch import nn
 

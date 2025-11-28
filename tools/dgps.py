@@ -15,6 +15,7 @@ import torch
 
 
 def _stable_hash(params) -> str:
+    """Deterministically hash a dict of parameters for caching filenames."""
     h = hashlib.sha256()
     for key in sorted(params.keys()):
         h.update(str(key).encode())
@@ -29,18 +30,22 @@ def _stable_hash(params) -> str:
     return h.hexdigest()
 
 def _ensure_dir(d: str):
+    """Create directory `d` if it does not already exist."""
     os.makedirs(d, exist_ok=True)
 
 def make_path(dir='tmp', **params):
+    """Build a deterministic cache path based on params (n, d, etc.)."""
     h = _stable_hash(params)
     fname = f'gaussian_pairs_n{params["n"]}_d{params["d"]}_{h}.npz'
     fpath = os.path.join(dir, fname)
     return fpath
 
 def is_square(t):
+    """Return True if tensor `t` is square (2D with equal dims)."""
     return t.ndim == 2 and t.shape[0] == t.shape[1]
 
 def mean_cov_dims_match(μ, Σ):
+    """Check that mean vector `μ` length matches covariance matrix dimension."""
     return (
         μ.ndim == 1 and
         Σ.ndim == 2 and
@@ -59,20 +64,23 @@ def generate_gaussian_pairs(
 ):
     """Generate paired Gaussian datasets with caching.
 
-    Args:
-      n: number of samples.
-      d: dimensionality of each sample.
-      mean_x: scalar or length-d sequence for X mean.
-      scale_x: scalar or length-d sequence for X standard deviation.
-      mean_y: scalar or length-d sequence for Y mean.
-      scale_y: scalar or length-d sequence for Y standard deviation.
-      data_dir: directory to save cached datasets (default `tmp`).
-      seed: random seed for reproducibility. Different seeds produce different files.
-      force: if True, regenerate and overwrite existing cached file.
+    Parameters
+    ----------
+    n : int
+        Number of samples to generate for each measure.
+    μ_x, Σ_x : torch.Tensor
+        Mean vector and covariance matrix for the X distribution.
+    μ_y, Σ_y : torch.Tensor
+        Mean vector and covariance matrix for the Y distribution.
+    data_dir : str, optional
+        Directory under which to persist cached tensors.
+    force : bool, optional
+        If True, ignore any existing cache file and regenerate samples.
 
-    Returns:
-      (x, y, path) where `x` and `y` are numpy arrays of shape `(n, d)` and
-      `path` is the `.npz` file path used for caching.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, str]
+        Generated `x`, `y`, and the cache path used for persistence.
     """
     _ensure_dir(data_dir)
     if (not torch.is_tensor(μ_x)) or (not torch.is_tensor(Σ_x)) or (not torch.is_tensor(μ_y)) or (not torch.is_tensor(Σ_y)):
@@ -112,17 +120,12 @@ def generate_gaussian_mixture_pair(
     force: bool = False,
     std: float = 0.3,
 ):
-    """
-    Generate a 2D Gaussian mixture pair (X, Y).
+    """Sample a fixed 2D Gaussian mixture pair and cache outputs.
 
-    X is drawn from a product measure:
-      X_1 ~ (1/3) N(-2, std^2) + (1/3) N(0, std^2) + (1/3) N(2, std^2)
-      X_2 ~ N(0, 1.5)
-
-    Y is drawn from a product measure:
-      Y_1 ~ N(0, 1.5)
-      Y_2 ~ (1/3) N(-2, std^2) + (1/3) N(0, std^2) + (1/3) N(2, std^2)
-    Both (X_1, X_2) and (Y_1, Y_2) are product measures (coordinates independent).
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, str]
+        X, Y tensors with shape (n, 2) and the cache path.
     """
     _ensure_dir(data_dir)
 
@@ -181,6 +184,11 @@ def generate_grid(
             X_2 ~ Uniform[-L, L]
 
     This produces len(centers) approximately vertical Gaussian bands extending from -L to L.
+    
+    Returns
+    -------
+    tuple[torch.Tensor, str]
+        Generated samples `x` with shape `(n, 2)` and the cache path.
     """
     _ensure_dir(data_dir)
 
@@ -234,6 +242,11 @@ def generate_grid_XY(
     Y:
       - Independently generated grid as above, then coordinates swapped,
         so Y has horizontal bands.
+    
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        The cached `X` (vertical bands) and `Y` (horizontal bands) samples.
     """
     # Use separate subdirectories so cached X/Y don't collide
     x_dir = os.path.join(data_dir, "grid_X")

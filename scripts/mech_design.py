@@ -1,3 +1,10 @@
+"""Command line driver for sweeping mechanism design experiments over multiple dimensions.
+
+Runs a grid of dimensions/kernels/costs, writing checkpoints and snapshots under
+`WRITING_ROOT/mech/`. Use --clear to remove previous runs in that directory
+before starting a new sweep.
+"""
+
 import argparse
 import os
 import shutil
@@ -29,7 +36,7 @@ parser.add_argument(
 parser.add_argument(
     "--epsilon",
     type=float,
-    default=5e-4,
+    default=1e-3,
     help="Barrier epsilon threshold for the constraints.",
 )
 args = parser.parse_args()
@@ -41,16 +48,11 @@ if args.clear:
 torch.manual_seed(0)
 
 def candidate_scale(dim: int, base: float = 5.0, target: float = 999.0, growth: float = 0.01) -> float:
-    """Return a smoothly growing candidate size as dim increases.
-
-    The value starts at `base` when `dim == 1` and approaches `base + target`
-    as `dim` grows.  The `growth` rate controls how quickly the curve rises
-    (larger values push it toward the ceiling faster).  The formula uses an
-    exponential ramp so the list comprehension stays lightweight and monotonic.
-    """
+    """Return a smoothly growing candidate size that approaches `base+target` as `dim` increases."""
     return base + target * (1 - exp(-growth * (dim - 1)))
 
 def dot_kernel(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    """Simple dot product kernel used when bundling goods independent of constraints."""
     return (X * Y).sum(dim=-1)
 
 def mismatch_kernel(X: torch.Tensor, Y: torch.Tensor, α=4., κ=2.) -> torch.Tensor:
@@ -61,11 +63,13 @@ def euclidean_cost(Y, β=1.0, ε=1e-4):
     return β * (torch.sqrt(Y**2 + ε**2) - ε).sum(dim=-1)
 
 epsilon = args.epsilon
-dims = [1, 2, 4, 6, 20, 100, 250, 500]#[::-1]
+# Sweep dimensions with smoothly growing candidate counts per dim.
+dims = [1, 2, 4, 6, 12, 50, 100, 250, 500]#[::-1]
 npoints_per_dim = [int(candidate_scale(d, base=2, target=275, growth=0.015)) for d in dims]
 print("npoints per dim:", npoints_per_dim)
-patience = 400
-factor = 0.6
+# Training / scheduler defaults shared across sweeps.
+patience = 300
+factor = 0.75
 nsteps = args.niters
 max_samples = 10_000
 temp = 60.
@@ -77,7 +81,7 @@ sorted_model = True
 is_Y_parameter = True
 is_there_default = True
 window = 1000
-default_utility = 4*epsilon
+default_utility = 2*epsilon
 scheduler_threshold = 1e-2
 max_clipping_norm = 10
 unif_sample = torch.rand(max_samples, max(dims))
@@ -88,6 +92,9 @@ kernels = [dot_kernel, mismatch_kernel]
 samples = [unif_sample, lognormal_sample]
 y_maxes = [1.0, None]
 
+# Each tuple (y_max, cost, kernel, sample) defines one sweep family:
+#   - dot_kernel + no cost on [0,1]
+#   - mismatch_kernel + euclidean_cost on unbounded lognormal types
 for y_max, cost, kernel, big_sample in zip(y_maxes, costs, kernels, samples):
     for dim, npoints in zip(dims, npoints_per_dim):
         torch.manual_seed(1)
@@ -141,8 +148,9 @@ for y_max, cost, kernel, big_sample in zip(y_maxes, costs, kernels, samples):
                 "use_wandb": False,
                 "writing_dir": writing_dir_dim,
                 "convergence_tolerance": convergence_tolerance,
-                "epsilon": epsilon,
-                "temp_warmup_steps": temp_warmup_steps,
-                "temp_schedule_initial": temp_schedule_initial,
-            },
-        )
+            "epsilon": epsilon,
+            "temp_warmup_steps": temp_warmup_steps,
+            "temp_schedule_initial": temp_schedule_initial,
+        },
+    )
+        # Artifacts: snapshots/metrics written under writing_dir_dim (CSV/pt files).

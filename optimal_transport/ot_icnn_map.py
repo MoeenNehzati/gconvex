@@ -1,13 +1,26 @@
+"""ICNN-based optimal transport solver with alternating f/g steps."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import WRITING_ROOT
 from optimal_transport.ot import OT
 from tools.feedback import logger
 
 def count_icnn_params(dim, hidden_sizes):
     """
-    hidden_sizes: list like [h1, h2, ..., hL] where hL is typically 1
+    Count parameters of an ICNN given layer widths.
+
+    Parameters
+    ----------
+    dim : int
+        Input dimensionality.
+    hidden_sizes : Sequence[int]
+        Widths for each hidden layer (final width usually 1 for scalar output).
+
+    Returns
+    -------
+    int
+        Total parameter count for A_k, b_k, and W_k matrices.
     """
     total = 0
     # A_k and b_k
@@ -23,10 +36,23 @@ def choose_icnn_architecture(dim, n_params_target,
                              depth_range=(2, 8), 
                              width_range=(4, 2048)):
     """
-    Returns (depth, hidden_sizes, param_count)
+    Search for ICNN architecture that closely matches a target parameter budget.
 
-    hidden_sizes is a list like [h, h, ..., h, 1]
-    so the ICNN ends with a scalar output.
+    Parameters
+    ----------
+    dim : int
+        Input dimensionality of the ICNN.
+    n_params_target : int
+        Desired total number of parameters.
+    depth_range : tuple[int, int]
+        Inclusive search range for the number of layers.
+    width_range : tuple[int, int]
+        Range of widths to try per hidden layer.
+
+    Returns
+    -------
+    tuple[int, list[int], int]
+        (depth, hidden_sizes, actual_param_count) for the best matching architecture.
     """
 
     best = None
@@ -65,8 +91,17 @@ class KantorovichPotential(nn.Module):
     """
 
     def __init__(self, input_size, hidden_size_list):
-        super().__init__()
+        """
+        Initialize trainable ICNN parameters for the Kantorovich potential.
 
+        Parameters
+        ----------
+        input_size : int
+            Dimensionality of each input sample.
+        hidden_size_list : Sequence[int]
+            Width of each hidden layer (last entry should be 1 for scalar output).
+        """
+        super().__init__()
         # hidden_size_list always contains 1 at the end (scalar output)
         self.input_size = input_size
         self.num_hidden_layers = len(hidden_size_list)
@@ -137,13 +172,9 @@ class KantorovichPotential(nn.Module):
 
     def get_hidden_size(self):
         """
-        Returns:
-            depth: number of layers
-            hidden_sizes: list of hidden layer widths (includes final scalar 1)
-            n_params: number of parameters in this ICNN
+        Return the per-layer widths (including the final scalar output).
         """
-        hidden_sizes = [A.shape[1] for A in self.A]   # hidden sizes from A matrices
-        return hidden_sizes
+        return [A.shape[1] for A in self.A]   # hidden sizes from A matrices
 
 
 class ICNNOT(OT):
@@ -159,6 +190,26 @@ class ICNNOT(OT):
 
     def __init__(self, input_dim, f_model, g_model, lr,
                  lambda_reg=1.0, betas=(0.5, 0.9), device="cpu"):
+        """
+        Initialize alternating ICNN optimal transport solver.
+
+        Parameters
+        ----------
+        input_dim : int
+            Dimensionality of input data.
+        f_model : nn.Module | None
+            Model representing u potential.
+        g_model : nn.Module | None
+            Model representing v potential.
+        lr : float
+            Learning rate for inner Adam optimizers.
+        lambda_reg : float
+            Coefficient for positivity penalty on g_model.
+        betas : tuple[float, float]
+            Adam beta parameters.
+        device : str
+            Device identifier (\"cpu\", \"cuda\", ...).
+        """
 
         self.device  = torch.device(device)
         self.lr      = lr
@@ -193,12 +244,25 @@ class ICNNOT(OT):
                                       *args,
                                       **kwargs):
         """
-        Static method.
-        Finds the ICNN architecture that matches the parameter budget
-        and returns fully initialized (f_model, g_model).
+        Determine suitable ICNN depth/width and instantiate f/g models.
 
-        Returns:
-            f_model, g_model, depth, hidden_sizes, actual_param_count
+        Parameters
+        ----------
+        dim : int
+            Input dimension of the transport maps.
+        n_params_target : int
+            Target budget for trainable parameters.
+        depth_range : tuple[int, int]
+            Inclusive range of depths to search.
+        width_range : tuple[int, int]
+            Width range for hidden layers.
+        device : str
+            Device label for the initialized models.
+
+        Returns
+        -------
+        ICNNOT
+            Fully configured OT solver built from auto-selected ICNNs.
         """
         # local imports or replace with your file paths
         # Search for architecture
@@ -231,7 +295,21 @@ class ICNNOT(OT):
     # ----------------------------------------------------------------------
     def _compute_core(self, x, y, create_graph=True):
         """
-        Equivalent to the TensorFlow ops x→fx, y→gy, gradients, losses, W2.
+        Evaluate potentials, gradients, and loss terms for a batch.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Batch of source samples.
+        y : torch.Tensor
+            Batch of target samples.
+        create_graph : bool
+            Whether to retain gradient graph for higher-order autodiff.
+
+        Returns
+        -------
+        dict
+            Contains fx, gy, gradients, losses, and dual W2 objective scalars.
         """
 
         x = x.to(self.device)
@@ -239,6 +317,7 @@ class ICNNOT(OT):
         x.requires_grad_(True)
         y.requires_grad_(True)
 
+        # Evaluate u and v potentials on the current minibatch
         fx = self.f_model(x)         # (B,1)
         gy = self.g_model(y)         # (B,1)
 
@@ -258,11 +337,11 @@ class ICNNOT(OT):
         # <y, ∇g(y)>
         y_dot_grad_gy = (y * grad_gy).sum(dim=1, keepdim=True)
 
-        # Norms
+        # Square norms for regularization terms
         x_squared = (x * x).sum(dim=1, keepdim=True)
         y_squared = (y * y).sum(dim=1, keepdim=True)
 
-        # Losses
+        # Loss components driving alternating optimization
         f_loss = (fx - f_grad_gy).mean()
         g_loss = (f_grad_gy - y_dot_grad_gy).mean()
 
@@ -328,6 +407,9 @@ class ICNNOT(OT):
 
 
     def transport_X_to_Y(self, X):
+        """
+        Return gradient map ∇f that transports X → Y.
+        """
         X = X.to(self.device)
         X.requires_grad_(True)
         fx = self.f_model(X)
@@ -335,6 +417,9 @@ class ICNNOT(OT):
         return grad_fx
 
     def transport_Y_to_X(self, Y):
+        """
+        Return gradient map ∇g that transports Y → X.
+        """
         Y = Y.to(self.device)
         Y.requires_grad_(True)
         gy = self.g_model(Y)
@@ -342,6 +427,9 @@ class ICNNOT(OT):
         return grad_gy
 
     def debug_losses(self, X, Y):
+        """
+        Return loss diagnostics (f_loss, g_loss, W2) without gradient tracking.
+        """
         out = self._compute_core(X, Y, create_graph=False)
         return [out["f_loss"].item(),
                 out["g_loss"].item(),
@@ -358,10 +446,20 @@ class ICNNOT(OT):
             convergence_tol=1e-4,
             convergence_patience=50):
         """
-        Full-batch ICNN-OT training with:
-        - caching by architecture+data hash
-        - checkpoint resume
-        - early stopping by W2 convergence
+        Full-batch ICNN-OT training loop with early stopping by W2 convergence.
+
+        Notes
+        -----
+        - `inner_steps` controls how many g-updates precede each f-update.
+        - `lambda_reg`>0 uses an L2 penalty on negative W (no projection);
+          `lambda_reg`<=0 projects W≥0 after each g-step.
+        - Caching / checkpoint resume are provided by the OT base class; this
+          method just runs the raw alternating updates for the given data.
+        
+        Returns
+        -------
+        dict
+            Logs for f/g losses and W2 over the training run.
         """
         # --------------------------------------------------------
         # Begin training (fresh or resumed)
@@ -427,6 +525,7 @@ class ICNNOT(OT):
         return logs
     
     def save(self, address, iters_done):
+        """Serialize ICNN states and iterations completed."""
         torch.save(
             {
                 "f_model_state_dict": self.f_model.state_dict(),
@@ -437,6 +536,7 @@ class ICNNOT(OT):
         )
 
     def load(self, address):
+        """Restore saved ICNN states and return iterations completed."""
         data = torch.load(address, map_location=self.device)
         self.f_model.load_state_dict(data["f_model_state_dict"])
         self.g_model.load_state_dict(data["g_model_state_dict"])
