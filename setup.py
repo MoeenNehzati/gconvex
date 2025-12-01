@@ -23,19 +23,15 @@ setup(
     url="https://github.com/MoeenNehzati/gconvex",
     packages=find_packages(exclude=("tests", "docs")),
     include_package_data=True,
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=[
-        # Core numeric / ML
-        "torch>=1.9.0,<2.0",
-        "torchvision>=0.10.0,<0.15",
+        # Core numeric / ML (torch>=2.0 needed for torch.compile)
+        "torch>=2.0.0,<3.0",
         "numpy>=1.19.0,<2.0",
         # Visualization & data
         "matplotlib>=3.3.0,<4.0",
         "pandas>=1.1.0,<2.0",
-        "Pillow>=8.0.0,<10.0",
-        # Utilities
-        "tqdm>=4.50.0",
-        "h5py>=3.0.0",
+        # Logging / notebook utilities
         "rich>=10.0.0",
         "ipython>=7.0.0",
     ],

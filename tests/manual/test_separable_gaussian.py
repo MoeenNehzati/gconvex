@@ -6,7 +6,7 @@ All tuning knobs are grouped in a CONFIG BLOCK at the top, each parameter is exp
 
 Run manually with:
 
-    pytest tests/manual/test_gaussian_end_to_end.py -v -s
+    pytest tests/manual/test_separable_gaussian.py -v -s
 """
 
 import unittest
