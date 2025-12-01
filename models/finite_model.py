@@ -1375,7 +1375,9 @@ class FiniteModel(nn.Module):
         Y_init = torch.randn(1, num_candidates, num_dims)
         min_val, max_val = Y_init.min(), Y_init.max()
 
-        if not sorted_model:
+        if sorted_model:
+            Y_init = self._prepare_sorted_Y_init(Y_init)
+        else:
             Y_init = self._initialize_Y_init(Y_init, min_val, max_val)
 
         if is_y_parameter:
@@ -1410,6 +1412,21 @@ class FiniteModel(nn.Module):
             return max_val - Y_init + (self.y_max - self.original_dist_to_bounds)
         return Y_init
 
+    def _prepare_sorted_Y_init(self, Y_init: torch.Tensor) -> torch.Tensor:
+        """Apply one-time rescale for sorted models so later updates are not clamped."""
+        # sorted path builds Y via softplus increments + cumsum; rescale once here
+        increments = F.softplus(Y_init)
+        sorted_Y = torch.cumsum(increments, dim=-1)
+        if (self.y_min is not None) or (self.y_max is not None):
+            sorted_Y = self._rescale_to_range(sorted_Y)
+            diffs = torch.cat(
+                [sorted_Y[..., :1], sorted_Y[..., 1:] - sorted_Y[..., :-1]],
+                dim=-1,
+            )
+            safe_diffs = diffs.clamp_min(1e-8)
+            Y_init = torch.log(torch.expm1(safe_diffs))
+        return Y_init
+
 
     # ============================================================
     # Helpers: Y accessors / full intercepts
@@ -1424,7 +1441,6 @@ class FiniteModel(nn.Module):
 
         increments = F.softplus(base)
         sorted_Y = torch.cumsum(increments, dim=-1)
-        sorted_Y = self._rescale_to_range(sorted_Y)
         return sorted_Y
 
     def _rescale_to_range(self, Y: torch.Tensor) -> torch.Tensor:

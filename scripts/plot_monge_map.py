@@ -33,6 +33,11 @@ Y_ACCURACY = 2e-3
 NY = int((2 * RADIUS) / Y_ACCURACY) + 1
 N_PARAMS = NY * DIM
 
+TITLE_FONT_SIZE = 20
+AXIS_LABEL_FONT_SIZE = 14
+FIG_SIZE = (18, 6.5)
+LAYOUT_PAD = 1.0
+
 OUTER_LR = 1e-2
 TEMP_MIN = 1.0
 TEMP_MAX = 60.0
@@ -157,7 +162,7 @@ def plot_monge_map(
         "T": "yellow",
     }
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=FIG_SIZE)
     axes = axes.tolist()
 
     axes[0].scatter(
@@ -168,7 +173,7 @@ def plot_monge_map(
         Y_np[:, 0], Y_np[:, 1], s=size, alpha=0.6,
         color=colors["Y"],
     )
-    axes[0].set_title("X and Y marginals", fontsize=16)
+    axes[0].set_title("X and Y marginals", fontsize=TITLE_FONT_SIZE)
     axes[0].set_aspect("equal", "box")
     legend_handles_0 = [
         Line2D(
@@ -181,8 +186,8 @@ def plot_monge_map(
         ),
     ]
     axes[0].legend(handles=legend_handles_0, fontsize=12, loc="lower left", markerscale=markerscale)
-    axes[0].set_xlabel("Dimension 1", fontsize=14)
-    axes[0].set_ylabel("Dimension 2", fontsize=14)
+    axes[0].set_xlabel("Dimension 1", fontsize=AXIS_LABEL_FONT_SIZE)
+    axes[0].set_ylabel("Dimension 2", fontsize=AXIS_LABEL_FONT_SIZE)
 
     axes[1].scatter(
         X_np[:, 0], X_np[:, 1], s=size, alpha=0.6,
@@ -196,10 +201,10 @@ def plot_monge_map(
         T_L22_np[:, 0], T_L22_np[:, 1], s=size, alpha=0.6,
         color=colors["T"],
     )
-    axes[1].set_title("Monge map for $c(x,y)=||x-y||_2^2$", fontsize=16)
+    axes[1].set_title("Monge map for $c(x,y)=||x-y||_2^2$", fontsize=TITLE_FONT_SIZE)
     axes[1].set_aspect("equal", "box")
-    axes[1].set_xlabel("Dimension 1", fontsize=14)
-    axes[1].set_ylabel("Dimension 2", fontsize=14)
+    axes[1].set_xlabel("Dimension 1", fontsize=AXIS_LABEL_FONT_SIZE)
+    axes[1].set_ylabel("Dimension 2", fontsize=AXIS_LABEL_FONT_SIZE)
     indices_l22 = _choose_indices(X.shape[0], subsample_l22)
     for idx in indices_l22.tolist():
         axes[1].plot(
@@ -238,10 +243,10 @@ def plot_monge_map(
         T_nL22_np[:, 0], T_nL22_np[:, 1], s=size, alpha=0.6,
         color=colors["T"],
     )
-    axes[2].set_title("Monge map for $c(x,y) = -||x-y||_2^2$", fontsize=16)
+    axes[2].set_title("Monge map for $c(x,y) = -||x-y||_2^2$", fontsize=TITLE_FONT_SIZE)
     axes[2].set_aspect("equal", "box")
-    axes[2].set_xlabel("Dimension 1", fontsize=14)
-    axes[2].set_ylabel("Dimension 2", fontsize=14)
+    axes[2].set_xlabel("Dimension 1", fontsize=AXIS_LABEL_FONT_SIZE)
+    axes[2].set_ylabel("Dimension 2", fontsize=AXIS_LABEL_FONT_SIZE)
     indices_nl22 = _choose_indices(X.shape[0], subsample_nl22)
     for idx in indices_nl22.tolist():
         axes[2].plot(
@@ -268,7 +273,7 @@ def plot_monge_map(
     ]
     axes[2].legend(handles=legend_handles_2, fontsize=12, loc="lower left", markerscale=markerscale)
 
-    fig.tight_layout()
+    fig.tight_layout(pad=LAYOUT_PAD)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150)
     print(f"Saved Monge map figure to {output_path}")

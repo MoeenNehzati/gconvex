@@ -506,6 +506,7 @@ class Trainer:
                 mean_profit = mechanism_data["profits"].mean()
                 mean_profit_per_good = mean_profit / self.mechanism.num_dims
                 g = mean_profit + weighted_penalties
+                g_per_good = g / self.mechanism.num_dims
                 l = -g
                 l.backward()
                 l_scaler = l.item()
@@ -528,7 +529,7 @@ class Trainer:
                 if self.scheduler is not None:
                     if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                         try:
-                            self.scheduler.step(g.item())
+                            self.scheduler.step(g_per_good.item())
                         except Exception:
                             self.scheduler.step()
                     else:
